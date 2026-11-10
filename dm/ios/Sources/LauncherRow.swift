@@ -1,4 +1,4 @@
-// One launcher setting as a row (a menu, a slider with its percentage, a toggle), shared by the iOS launcher (Launcher.swift) and the Mac app's settings window (dm/mac/Launcher.swift).
+// One launcher setting as a row (a menu, a slider with its percentage or its unit, a toggle), shared by the iOS launcher (Launcher.swift) and the Mac app's settings window (dm/mac/Launcher.swift).
 // A row whose setting is fixed by an env file or by the launch environment is shown but disabled.
 import SwiftUI
 
@@ -33,7 +33,7 @@ struct SettingRow: View {
             switch s.kind {
             case "choice":
                 Picker(selection: m.binding(s)) {
-                    ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) }
+                    ForEach(m.options(s), id: \.[0]) { Text($0[1]).tag($0[0]) }   // an option whose rule does not hold is not offered (option_needs)
                 } label: {
                     settingLabel
                 }
