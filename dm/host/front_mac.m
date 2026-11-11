@@ -1527,6 +1527,16 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
+        // DM_WINDOW_SCREEN=builtin (or a screen's name as System Settings shows it): open the window on that screen instead of the main one, so a test run stays off the
+        // screen somebody is using. Fullscreen (DM_FULLSCREEN) then takes that screen
+        { const char *ws = getenv("DM_WINDOW_SCREEN");
+          if (ws && *ws) { NSScreen *pick = nil;
+              for (NSScreen *s in NSScreen.screens) { CGDirectDisplayID did = [s.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+                  if (!strcmp(ws, "builtin") ? CGDisplayIsBuiltin(did) != 0 : !strcmp(ws, s.localizedName.UTF8String ?: "")) { pick = s; break; } }
+              if (pick) { NSRect f = pick.visibleFrame, w = win.frame;
+                  [win setFrameOrigin:NSMakePoint(NSMidX(f) - w.size.width / 2, NSMidY(f) - w.size.height / 2)];
+                  LOG("front end: window opened on the screen '%s' (DM_WINDOW_SCREEN=%s)", pick.localizedName.UTF8String ?: "?", ws); }
+              else LOG("[RED] DM_WINDOW_SCREEN=%s: no such screen, the window stays on the main one", ws); } }
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;

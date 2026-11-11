@@ -2852,6 +2852,33 @@ static int tex_atomic_alias(id<MTLTexture> base) {
         || pf == MTLPixelFormatRG16Unorm || pf == MTLPixelFormatRG16Snorm || pf == MTLPixelFormatRG16Uint || pf == MTLPixelFormatRG16Sint || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float;
     return bytes32 && (base.textureType == MTLTextureType2D || base.textureType == MTLTextureType2DArray) && base.sampleCount == 1 && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
 }
+// ---------- Shadow map resolution (DM_SHADOW_SCALE) ----------
+// Breath of the Wild draws its sun shadows into a 896x896 depth array of three cascades (the profile's shadow_maps key names the size), whatever the scene's size: at 4K the
+// shadow edges are the coarsest thing on screen. DM_SHADOW_SCALE=<percent> (100 to 400; the launcher's Shadow resolution) makes the Metal texture of each depth array texture of
+// a listed size that much larger in both directions. The game is told nothing: it still sets a 896x896 viewport and scissor, which a pass whose only attachment is such a
+// texture multiplies (g_pass.ups: draw_'s viewport and scissor, clr_scissor), and the shaders that read the map sample it with normalized coordinates through a comparison
+// sampler, so they read the finer map as it is. As Cemu's Shadows graphic pack does on the Wii U version (its TextureRedefine of the 720x720 depth textures)
+static uint64_t g_shadow_made, g_shadow_passes;   // textures made larger, passes drawn into one
+void mtl_shadow_stats(uint64_t *made, uint64_t *passes) { *made = g_shadow_made; *passes = g_shadow_passes; }
+static int shadow_pct(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_SHADOW_SCALE"); int n = e && *e ? atoi(e) : 100;
+    if (!DM_GAME_SHADOW_MAPS_N) n = 100;
+    else if (n < 100 || n > 400) { MLOG("[RED] DM_SHADOW_SCALE=%s: a percentage from 100 to 400; keeping the game's size", e); n = 100; }
+    if (n != 100) MLOG("shadow resolution (DM_SHADOW_SCALE): the game's shadow maps (" DM_GAME_SHADOW_MAPS " depth arrays) are made at %d%% of their size", n);
+    return v = n;
+}
+// Whether t is one of the profile's shadow maps: a depth array texture of a listed size
+static int shadow_tex(const tex_t *t) {
+    if (!t || t->d.target != 4) return 0;
+    for (const char *q = DM_GAME_SHADOW_MAPS; *q;) {
+        char *end; unsigned long w = strtoul(q, &end, 10), h = *end == 'x' ? strtoul(end + 1, &end, 10) : 0;
+        if (w == t->d.width && h == t->d.height) { uint32_t pf = 0; uint8_t swz[4]; return nvn_fmt_to_mtl(t->d.format, &pf, swz) && (pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float); }
+        if (*end != ',') break;
+        q = end + 1;
+    }
+    return 0;
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -2861,6 +2888,10 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.pixelFormat = (MTLPixelFormat)pf;
     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
+    if (DM_GAME_SHADOW_MAPS_N && shadow_pct() != 100 && shadow_tex(t)) {   // a shadow map, made larger (see shadow_pct)
+        d.width = (d.width * (NSUInteger)shadow_pct() + 50) / 100; d.height = (d.height * (NSUInteger)shadow_pct() + 50) / 100;
+        if (!g_shadow_made++) MLOG("shadow resolution: first shadow map made %lux%lu instead of %ux%u (%u layers, format %#x, ser=%llu)", (unsigned long)d.width, (unsigned long)d.height, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)t->serial);
+    }
     switch (t->d.target) {
         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)
@@ -4660,7 +4691,8 @@ static void ts_boundary(void) {   // the end of a segment and the start of the n
 }
 static int enc_open(void) { return g_enc != nil; }
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+// ups: the percentage the game's viewport and scissor are multiplied by in this pass, 100 but in a pass into a shadow map made larger (shadow_pct)
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered, ups; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
 static int g_rp_layered;   // the pass about to open is for a vertex shader that writes the layer (draw → rp_begin_ex)
 // Slice-merged passes (DM_NVN_SLICE_MERGE, on by default; 0 off): consecutive passes that each draw into another layer of one level of the same array or cube texture,
 // with nothing between them but state, uniform updates and draws (no game barrier, clear, copy or dispatch: sm_scan), run as one layered pass. Each draw reaches its layer through a vertex
@@ -5531,6 +5563,12 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
            R.rt.has_dview && R.rt.dview.set_format ? R.rt.dview.format : 0, g_pass.dfmt, g_pass.sfmt, g_pass.hd, g_pass.hs, clear_only);
         if (dt || stt) g_pass.samples = (uint32_t)(dt ? dt : stt).sampleCount;
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
+        g_pass.ups = 100;
+        if (DM_GAME_SHADOW_MAPS_N && shadow_pct() != 100 && R.rt.depth && shadow_tex(R.rt.depth)) {
+            int col = 0; for (int i = 0; i < R.rt.n && i < 8; i++) col |= R.rt.color[i] != NULL;
+            if (col) { static int once; if (!once++) MLOG("[RED] shadow resolution: a pass draws into a shadow map and a colour target of the game's size; its viewport is left as the game set it"); }
+            else { g_pass.ups = shadow_pct(); g_shadow_passes++; }
+        }
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
         g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
@@ -5723,6 +5761,7 @@ static void shmap_read(void) {
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
+    uint8_t su;   // a fragment shader that is the game's scene upscale draw (DM_GAME_SCENE_UPSCALE): 0 not decided, 1 it is, 2 it is not (scene_up_prepare)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
@@ -6837,6 +6876,22 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+// Anisotropic filtering raised by the player (DM_ANISO=2..16, the launcher's Anisotropic filtering): a floor under the game's own level for the samplers that filter a mip chain linearly
+// (magnification and minification linear, nearest or linear between levels, more than one LOD in range), which are the ones materials use. Comparison (shadow) and reduction samplers,
+// nearest ones and those held to one level (the bloom and blur chains) keep the game's level: there it would change what the shader is given, not how sharp a surface at a shallow angle is.
+// On a screen-aligned draw of a render target the footprint is square, so a raised level samples the same texels. Breath of the Wild asks for 1x on all but one sampler (2x); after Cemu's
+// graphic pack for it (overwriteAnisotropy on every texture but render targets, cube maps and shadows)
+static uint64_t g_aniso_raised;
+uint64_t mtl_aniso_raised(void) { return g_aniso_raised; }
+static int aniso_floor(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_ANISO"); int n = e ? atoi(e) : 0;
+    v = n >= 2 ? (n > 16 ? 16 : n) : 0;
+    if (e && *e && strcmp(e, "off") && strcmp(e, "0") && strcmp(e, "1") && (n < 2 || n > 16)) MLOG("[RED] DM_ANISO=%s: off or 2 to 16; %s", e, v ? "taking 16" : "keeping the game's own");
+    if (v) MLOG("anisotropic filtering (DM_ANISO): at least %dx on the game's mipmapped linear samplers", v);
+    return v;
+}
+static int aniso_raises(const samp_par *p) { return p->magf && (p->minf == 3 || p->minf == 5) && !p->cmp_mode && !p->reduction && p->lod_max > p->lod_min; }
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
@@ -6849,6 +6904,7 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    { int af = aniso_floor(); if (af && d.maxAnisotropy < (NSUInteger)af && aniso_raises(&p)) { d.maxAnisotropy = (NSUInteger)af; if (!g_aniso_raised++) MLOG("anisotropic filtering: first sampler raised to %dx (sampler %d, the game's %g)", af, sid, p.aniso); } }
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
@@ -10238,6 +10294,8 @@ static int img_atomic_ok(id<MTLTexture> t, const nvn_rbind *b) {
 // Snapshot substitution for same-pass feedback sampling (registered by fb_prepare, used by encode_args; see the notes before draw)
 static uint64_t g_draw_seq, g_fb_seq, g_fb_count; static int g_fb_n, g_fb_rebind;
 static __unsafe_unretained id<MTLTexture> g_fb_src[4]; static __strong id<MTLTexture> g_fb_use[4]; static uint64_t g_fb_rid[4];
+// The scene upscale draw through MetalFX (scene_up_prepare): for the draw g_su_seq, the fragment stage's texture g_su_tid is bound as MetalFX's output instead
+static int g_su_tid; static uint64_t g_su_seq = ~0ull, g_su_rid; static __strong id<MTLTexture> g_su_use;
 static inline int fb_snapshot_slot(int stage, id<MTLTexture> texture) {
     if (stage == 1 && g_fb_n && g_fb_seq == g_draw_seq)
         for (int i = 0; i < g_fb_n; i++) if (g_fb_src[i] == texture) return i;
@@ -10739,6 +10797,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             int snap = fb_snapshot_slot(nvn_stage, t);
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; }
+            else if (nvn_stage == 1 && tid && tid == g_su_tid && g_su_seq == g_draw_seq) { t = g_su_use; trid = g_su_rid; }   // the scene, scaled by MetalFX (scene_up_prepare)
             if (t && passdump() && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu swz=%d%d%d%d mtl=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
@@ -13295,6 +13354,7 @@ static int lc_keeps(uint32_t op) {
 
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static void scene_up_prepare(NvProg *pr);   // a game's scene upscale draw through MetalFX
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -13571,6 +13631,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
+    if (DM_GAME_SCENE_UPSCALE_N) scene_up_prepare(pr);   // the game's scene upscale draw: MetalFX scales the scene first and the draw reads its result
     if (R.has_sc && !g_enc && !S.rast_discard) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
@@ -13639,6 +13700,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (g_pass.ups > 100 && S.has_vp) { double k = g_pass.ups / 100.0; v.originX *= k; v.originY *= k; v.width *= k; v.height *= k; }   // a shadow map made larger (shadow_pct)
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -13649,6 +13711,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        if (g_pass.ups > 100) { x0 = x0 * g_pass.ups / 100; y0 = y0 * g_pass.ups / 100; x1 = (x1 * g_pass.ups + 99) / 100; y1 = (y1 * g_pass.ups + 99) / 100; }   // a shadow map made larger (shadow_pct)
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -14780,6 +14843,7 @@ static int clr_scissor(MTLScissorRect *sc) {   // the clear's scissor in the ope
     NSUInteger tw = g_pass.tw, th = g_pass.th; *sc = (MTLScissorRect){0, 0, tw, th};
     if (!R.has_sc) return tw && th;
     long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+    if (g_pass.ups > 100) { x0 = x0 * g_pass.ups / 100; y0 = y0 * g_pass.ups / 100; x1 = (x1 * g_pass.ups + 99) / 100; y1 = (y1 * g_pass.ups + 99) / 100; }   // a shadow map made larger (shadow_pct)
     if (x1 > (long)tw) x1 = (long)tw; if (y1 > (long)th) y1 = (long)th;
     if (x1 <= x0 || y1 <= y0) return 0;
     *sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)}; return 1;
@@ -15567,7 +15631,7 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
 // the checks below refuse runs the game's shader. The look changes (Apple's scaler instead of the game's network), so it is the player's choice; DM_UPSCALER=game (the default)
 // keeps the network. Found with the iPhone port's NDSR replacement (PR #1073), which decoded the rectangles. The network's own cost on the GPU is the translator's
 // LDSM / MOVM shuffles, open in docs/reference/shaders.md (Ampere HMMA through simdgroup_matrix)
-typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out, read; NSUInteger key[5]; int refused; } up_mfx_scaler;   // key: input w, h, output w, h, sRGB input; in: the RGBA16F input; out: the output (RGBA16F, or RGBA8Unorm for sRGB input); read: what the game's image is drawn from (out, or its sRGB view)
+typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out, read; NSUInteger key[5]; int refused; } up_mfx_scaler;   // key: input w, h, output w, h, colour (0 linear, 1 sRGB input decoded for the draw, 2 display-encoded in and out: scene_up_prepare); in: the RGBA16F input; out: the output (RGBA16F, or RGBA8Unorm for sRGB input); read: what the game's image is drawn from (out, or its sRGB view)
 enum { UP_MFX_SCALERS = 4 };
 static up_mfx_scaler g_up_mfx[UP_MFX_SCALERS]; static int g_up_mfx_next;
 static uint64_t g_up_mfx_n, g_up_mfx_kept;   // dispatches drawn by MetalFX, dispatches of a named shader left to it
@@ -15629,16 +15693,17 @@ static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger
     NSError *err = nil; uint64_t t0 = now_ns();
     if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
     MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
-    MTLPixelFormat of = srgb ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA16Float;   // sRGB input's result stays encoded, in 0-1 as the network clamps it, and an sRGB view of it decodes it for the draw into the game's image
+    MTLPixelFormat of = srgb == 2 ? MTLPixelFormatRGB10A2Unorm : srgb ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA16Float;   // sRGB input's result stays encoded, in 0-1 as the network clamps it, and an sRGB view of it decodes it for the draw into the game's image; display-encoded colour (2) stays as it is, in 10 bits
     d.colorTextureFormat = MTLPixelFormatRGBA16Float; d.outputTextureFormat = of; d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = ow; d.outputHeight = oh;
     d.colorProcessingMode = srgb ? MTLFXSpatialScalerColorProcessingModePerceptual : MTLFXSpatialScalerColorProcessingModeHDR;
     id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
+    if (!sc && srgb == 2 && g_fx_comp) { of = MTLPixelFormatRGBA8Unorm; d.outputTextureFormat = of; sc = [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp]; }   // no 10-bit output: 8 bits
     id<MTLTexture> in = nil, out = nil, read = nil;
     if (sc) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:iw height:ih mipmapped:NO];
         td.storageMode = MTLStorageModePrivate; td.usage = sc.colorTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; in = [g_dev newTextureWithDescriptor:td];
-        td.pixelFormat = of; td.width = ow; td.height = oh; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead | (srgb ? MTLTextureUsagePixelFormatView : 0); out = [g_dev newTextureWithDescriptor:td];
-        read = srgb ? [out newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB] : out;
+        td.pixelFormat = of; td.width = ow; td.height = oh; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead | (srgb == 1 ? MTLTextureUsagePixelFormatView : 0); out = [g_dev newTextureWithDescriptor:td];
+        read = srgb == 1 ? [out newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB] : out;
     }
     MLOG("%supscaler: MetalFX spatial scaler (%s) %lux%lu → %lux%lu%s, %.1f ms", sc && in && read ? "" : "[RED] ", srgb ? "perceptual" : "HDR", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh,
          sc && in && read ? "" : ": MetalFX made none; the game's upscaler draws this size", (now_ns() - t0) / 1e6);
@@ -15707,6 +15772,64 @@ static int up_mfx_encode(NvShader *cs) {
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
     return 1;
+}
+// ---------- A game's scene upscale draw through MetalFX (DM_SCENE_UPSCALE) ----------
+// Breath of the Wild draws its 3D scene at the render scale's size, tone-maps it there, and one full-target draw (fragment shader bd7ffdd435c6c3bc: the profile's scene_upscale key)
+// stretches that picture bilinearly into the output-size canvas the UI is then drawn on. Below 100 % render scale that stretch is what the player sees as blur. With the key in the
+// profile (and DM_SCENE_UPSCALE not game), MetalFX's spatial scaler scales the draw's texture to the target's size first (perceptual mode: the picture is display-encoded by then; through
+// the scaler's own RGBA16F input and 10-bit output), and the game's own draw then runs unchanged with the scaled picture bound in place of its texture (encode_args), so it samples
+// it texel for texel and its write mask, blending and uniforms stay the game's. Left to the game: a target not larger than the texture in both directions (100 % render scale),
+// a viewport that is not the whole target, a shader with other than one texture, an sRGB or integer texture, a replayed or tile-merged draw
+static uint64_t g_su_n, g_su_kept;   // draws that read MetalFX's picture, draws of the named shader left as they are
+void mtl_scene_up_stats(uint64_t *n, uint64_t *kept) { *n = g_su_n; *kept = g_su_kept; }
+static int scene_up_on(void) {
+    static int v = -1;
+    if (v >= 0) return v;
+    const char *e = getenv("DM_SCENE_UPSCALE"); v = !e || !*e || strcmp(e, "game");
+    if (e && *e && strcmp(e, "metalfx") && strcmp(e, "game")) MLOG("[RED] DM_SCENE_UPSCALE=%s: metalfx or game; taking metalfx", e);
+    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("scene upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the game's own draw scales the scene"); v = 0; }
+    MLOG("scene upscaling (DM_SCENE_UPSCALE): %s", v ? "metalfx, the picture the game's scene upscale draw (" DM_GAME_SCENE_UPSCALE ") stretches is scaled by MetalFX's spatial scaler first" : "game, the game's own bilinear stretch");
+    return v;
+}
+static void scene_up_prepare(NvProg *pr) {
+    NvShader *fs = pr ? pr->sh[1] : nil;
+    if (!fs) return;
+    if (!fs->su) fs->su = !strncmp(fs->key, DM_GAME_SCENE_UPSCALE, 16) ? 1 : 2;
+    if (fs->su != 1 || !scene_up_on() || S.rast_discard || !R.rt.n || !R.rt.color[0]) return;
+    if (g_defer_replaying || g_fz.active || g_geo_program) { g_su_kept++; return; }
+    int ti = -1, nt = 0;
+    for (int i = 0; i < fs->rf.nb; i++) if (fs->rf.b[i].kind == NVN_RB_TEX) { ti = i; nt++; }
+    if (nt != 1) { static int once; if (!once++) MLOG("[RED] scene upscaling: %s reads %d textures, not one; the game's draw scales the scene", fs->key, nt); g_su_kept++; return; }
+    int tid = (int)(tex_slot_h(S.tex[1], S.img[1], fs->rf.b[ti].reg) & 0xfffff);
+    void *tv = NULL; if (tid) tex_fast_rid(tid, &tv);
+    id<MTLTexture> in = (__bridge id<MTLTexture>)tv;
+    NSUInteger tw = 0, th = 0; rt_dims(&tw, &th);
+    if (!in || in.width >= tw || in.height >= th) return;   // the scene at the target's size already (100 % render scale): nothing to scale
+    int whole = !S.has_vp || (S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == (float)tw && S.vp[0][3] == (float)th);
+    if (!whole || in.textureType != MTLTextureType2D || in.sampleCount != 1 || fmt_int_or_ds(in.pixelFormat) || mtl_fmt_block(in.pixelFormat) ||
+        in.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || in.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB) { g_su_kept++; return; }
+    up_mfx_scaler *e = up_mfx_scaler_for(in.width, in.height, tw, th, 2); if (!e) { g_su_kept++; return; }
+    id<MTL4FXSpatialScaler> sc = e->sc; id<MTLTexture> color = e->in, result = e->out;
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    ubd_land_compute();
+    NVNcopyRegion at0 = {0, 0, 0, (int)in.width, (int)in.height, 1};
+    if (!copy_t2t_draw(in, color, 0, 0, 0, 0, &at0, &at0, 0, 0)) { args_dirty_all(); g_su_kept++; return; }   // into RGBA16F (a nearest draw: same size)
+    id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // as up_mfx_encode: MetalFX opens encoders of its own, which take no barrier
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
+    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
+    [ce endEncoding];
+    NSUInteger cw = in.width, ch = in.height;
+    rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) {
+        sc.colorTexture = color; sc.outputTexture = result; sc.inputContentWidth = cw; sc.inputContentHeight = ch;
+        [sc encodeToCommandBuffer:cb];
+    });
+    g_last_end_relaxed = 0;   // the next pass waits for the scaler whole (enc_r_begin_pass)
+    args_dirty_all();
+    g_su_tid = tid; g_su_seq = g_draw_seq; g_su_use = e->read; g_su_rid = e->read.gpuResourceID._impl;
+    g_fb_rebind = 1;   // the next draw encodes its own bindings again (fb_prepare)
+    if (!g_su_n++) MLOG("scene upscaling: first draw of %s reads MetalFX's picture, %lux%lu (format %lu) → %lux%lu (format %lu)", fs->key, (unsigned long)in.width, (unsigned long)in.height,
+                        (unsigned long)in.pixelFormat, (unsigned long)tw, (unsigned long)th, (unsigned long)result.pixelFormat);
+    else if (!(g_su_n % 7200)) MLOG("scene upscaling: %llu draws read MetalFX's picture, %llu left to the game's own stretch", (unsigned long long)g_su_n, (unsigned long long)g_su_kept);
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
 // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)

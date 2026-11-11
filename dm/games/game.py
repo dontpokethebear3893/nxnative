@@ -182,6 +182,10 @@ def header_one(g):
     if et not in ('on', 'off'): sys.exit(f'{g.id}: enc_thread must be on or off: {et}')
     cd = g.get('cut_draws', '64')   # the replay commits its command buffer every this many draws, between passes (nvn_mtl.m cut_draws; DM_NVN_CUT overrides): 0 = one command buffer per submission
     if not re.fullmatch(r'[0-9]{1,4}', cd) or int(cd) > 4096: sys.exit(f'{g.id}: cut_draws must be a draw count from 0 to 4096: {cd}')
+    su = g.get('scene_upscale', '')   # the fragment shader of the draw that stretches the 3D scene into the output-size canvas: MetalFX scales the scene for it (nvn_mtl.m scene_up_prepare; DM_SCENE_UPSCALE=game keeps the game's stretch)
+    if su and not re.fullmatch(r'[0-9a-f]{16}', su): sys.exit(f'{g.id}: scene_upscale must be a fragment shader key, 16 hex digits: {su}')
+    shm = g.get('shadow_maps', '')   # the sizes of the game's shadow maps, depth array textures: <w>x<h>,...; the host can make them larger (nvn_mtl.m shadow_pct; DM_SHADOW_SCALE, the launcher's Shadow resolution)
+    if shm and not re.fullmatch(r'[0-9]{1,5}x[0-9]{1,5}(,[0-9]{1,5}x[0-9]{1,5})*', shm): sys.exit(f'{g.id}: shadow_maps must be sizes <w>x<h> separated by commas: {shm}')
     cb = g.get('cut_busy', 'on')   # on: a cut commits only once earlier work has reported back (nvn_mtl.m sub_cut; Ocarina of Time's stalls); off: every cut commits (DM_NVN_CUT_BUSY overrides): on / off
     if cb not in ('on', 'off'): sys.exit(f'{g.id}: cut_busy must be on or off: {cb}')
     cp = g.get('core_preempt', 'off')   # same-core preemption approximation (hle_thread.c): on / off
@@ -259,6 +263,8 @@ def header_one(g):
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          f'#define DM_GAME_CUT_DRAWS {int(cd)}',
          f'#define DM_GAME_CUT_BUSY {int(cb == "on")}',
+         f'#define DM_GAME_SCENE_UPSCALE {q(su)}', f'#define DM_GAME_SCENE_UPSCALE_N {int(bool(su))}',
+         f'#define DM_GAME_SHADOW_MAPS {q(shm)}', f'#define DM_GAME_SHADOW_MAPS_N {len(shm.split(",")) if shm else 0}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
