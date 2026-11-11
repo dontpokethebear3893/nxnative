@@ -2182,8 +2182,9 @@ extern int g_dm_present_link;
 static int fps_high(void);
 static void vrr_tick(int c) {
     static int env = -2, link_env = -1, link0 = -1;
-    if (env == -2) { const char *e = getenv("DM_PRESENT_VRR"); env = e ? atoi(e) : -1; link_env = getenv("DM_PRESENT_LINK") != NULL; link0 = g_dm_present_link; }
-    int vrr = DM_GAME_VRR && dm_fps_state && c >= 60 && !link_env && env && (env == 1 || (front_fullscreen() && front_screen_variable_refresh()));
+    static int fg = -1;   // frame generation shows its frames on the display link's ticks (nvn_mtl.m fg_on): no variable refresh with it
+    if (env == -2) { const char *e = getenv("DM_PRESENT_VRR"); env = e ? atoi(e) : -1; link_env = getenv("DM_PRESENT_LINK") != NULL; link0 = g_dm_present_link; e = getenv("DM_FRAMEGEN"); fg = e && atoi(e) > 0; }
+    int vrr = DM_GAME_VRR && dm_fps_state && c >= 60 && !link_env && !fg && env && (env == 1 || (front_fullscreen() && front_screen_variable_refresh()));
     static int was = -1;
     if (vrr != was) {
         LOG("[nvn] variable refresh %s", vrr ? "on: frames are shown when done, the game steps by their real time" : "off: frames follow the display link's ticks");
