@@ -33,6 +33,11 @@ present_snap	on
 # Metal encoding on its own thread on the Mac too: running laps outdoors at 120 fps (M5 Max) it took 10,000 frames from 106.4 to 112.0 fps average, the 1% low from 52.6 to 58.2 and the 0.1% low from 43.6 to 55.3 fps (submit 4.49 -> 3.77 ms)
 enc_thread	on
 pso_mtl4	on
+# Segment commits on the Mac (nvn_mtl.m sub_cut; README.md, GPU work): the game waits on the fence of the frame it just submitted, so with commits held back while earlier work
+# runs, the GPU waited for the host's translation inside each frame. Every cut commits, every 32 draws (about 12.6 command buffers a frame): circling outdoors at a 120 fps
+# target (M5 Max, encode thread on) 104 → 115 fps, and three 10-minute runs held 114–116 fps with no GPU errors. DM_NVN_CUT / DM_NVN_CUT_BUSY override; iOS keeps 64 and the rule
+cut_draws	32
+cut_busy	off
 # Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as
 # 1920x1344 with a 1280x896 layout space, the HUD at the screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
 screen_aspect	on
