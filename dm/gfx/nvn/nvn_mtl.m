@@ -16107,6 +16107,9 @@ static uint64_t g_fg_late;
 // in a row have come in time; the game's frames are shown as it draws them meanwhile. All on the display link thread, under g_pq_mu. Judged by the link's ticks, not by the
 // time between presents, which a game's own pacing varies
 #define FG_STEADY 3
+// A present the display link shows for two ticks or more, which leaves a tick for its generated frame: one of 25 ms or more (a 30 fps game), and one of a 60 fps game
+// while the link runs at 120 Hz (link_sync). g_fg_tick is read without the lock in snap_take: a tick's interval, not a count
+static int fg_two_ticks(double period) { double tk = g_fg_tick; return period > 0.025 || (tk > 0 && period >= 1.5 * tk); }
 static int g_fg_steady, g_fg_starved; static uint64_t g_fg_paused_late, g_fg_paused_behind;
 
 // A display link callback whose present took 50 ms or more (three ticks): where the time went, so a silent link (the rescue below) can be traced to its wait.
@@ -16215,7 +16218,9 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     tex_t gt; int gen = it.gen && g_fg_tick > 0 && it.period >= 1.5 * g_fg_tick;
     if (gen) { memset(&gt, 0, sizeof gt); gt.magic = MAGIC('T', 'E', 'X', 0); gt.serial = it.gen; }
     @autoreleasepool { submitted = present_now(gen ? &gt : &it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
-    g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
+    // (with frame generation also a 60 fps present on the 120 Hz link: its second tick is its own picture's, after its generated frame, and without the hold that tick,
+    //  empty while frame generation is paused, counted as a late present and kept it paused)
+    g_link_hold_until = submitted && (it.period > 0.025 || (fg_on() && fg_two_ticks(it.period))) ? update.targetPresentationTimestamp + it.period : 0;
     link_slow_note(gen ? "a generated frame" : "a present", p0 - s0, now_ns() - p0, g_present_alloc_wait_ns - a0);
     if (submitted && gen) { pthread_mutex_lock(&g_pq_mu); g_fg_owe = it; g_fg_owe_tk = ticket; g_fg_owe_at = update.targetPresentationTimestamp + it.period / 2; g_fg_owed = 1; pthread_mutex_unlock(&g_pq_mu); }
     if (!submitted) {
@@ -16693,7 +16698,7 @@ static uint64_t snap_take(const tex_t *t, double period, const int crop[4], int 
     if (fg_on()) {   // the frame between the previous present and this one (frame generation): only for presents held two ticks or more, as the display link shows it
         int pk = (int)((atomic_load(&g_snap_next) + (uint64_t)g_snap_n - 1) % (uint64_t)g_snap_n);
         g_snap[k].seq = g_fg_seq;
-        if (period > 0.025) fg_encode(cb, k, pk, period); else g_fg_warm = 0;
+        if (fg_two_ticks(period)) fg_encode(cb, k, pk, period); else g_fg_warm = 0;
     }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = nil;

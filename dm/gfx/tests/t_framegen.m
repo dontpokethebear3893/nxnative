@@ -54,9 +54,9 @@ static int last_slot(void) { return (int)((g_snap_next + (uint64_t)g_snap_n - 1)
 @end
 @implementation TUpdate
 @end
-static double g_t = 100, g_tick_ms;   // g_tick_ms: how long the last tick's callback took (the drawable taken before it)
-static uint64_t tick(void) {   // one 60 Hz tick of the display link; returns the serial it showed (0 = none)
-    TUpdate *u = [TUpdate new]; u.drawable = [g_test_layer nextDrawable]; u.targetPresentationTimestamp = g_t; g_t += 1 / 60.0;
+static double g_t = 100, g_tick_ms, g_tick_dt = 1 / 60.0;   // g_tick_ms: how long the last tick's callback took (the drawable taken before it); g_tick_dt: the link's tick interval
+static uint64_t tick(void) {   // one tick of the display link (60 Hz unless g_tick_dt says otherwise); returns the serial it showed (0 = none)
+    TUpdate *u = [TUpdate new]; u.drawable = [g_test_layer nextDrawable]; u.targetPresentationTimestamp = g_t; g_t += g_tick_dt;
     uint64_t n = g_present_n; g_present_ser = 0;
     uint64_t t0 = now_ns();
     [[NvMetalDisplayLinkDelegate new] metalDisplayLink:(CAMetalDisplayLink *)nil needsUpdate:(CAMetalDisplayLinkUpdate *)u];
@@ -66,7 +66,7 @@ static uint64_t tick(void) {   // one 60 Hz tick of the display link; returns th
 // n presents from frame i0 at 30 fps on the link's 60 Hz ticks (two ticks each)
 static void steady(int i0, int n) { for (int i = 0; i < n; i++) { tex_t t = frame(i0 + i); present_enqueue(&t, 1 / 30.0, NULL, 0); copied(); tick(); tick(); } }
 int main(void) { @autoreleasepool {
-    alarm(30); setbuf(stdout, NULL);
+    alarm(60); setbuf(stdout, NULL);   // (about 35 s on an M5 Max: a tick whose drawable is not free waits up to a second for it)
     setenv("DM_FRAMEGEN", "1", 1); setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LINK", "0", 1);   // the present thread first; the link's ticks are called below
     mtl_init();
     g_test_layer = [CAMetalLayer layer]; g_test_layer.device = g_dev; g_test_layer.drawableSize = CGSizeMake(W, H); g_test_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -193,6 +193,21 @@ int main(void) { @autoreleasepool {
       printf("right-half crop on a full-size screen: snapshot %lux%lu, bright from %d to %d (the moving square from %d, the still one to %d), generated %s\n", (unsigned long)c.width, (unsigned long)c.height, a, z, square_x(31) - W / 2, STILL + SQ - W / 2 - 1, g_snap[k7].gen_ok ? "yes" : "no");
       CHECK("a crop shown at its size is copied alone, 1:1, and shown whole", c.width == W / 2 && c.height == H && a == square_x(31) - W / 2 && z == STILL + SQ - W / 2 - 1 && g_snap[k7].gen_ok
             && !g_pq[(g_pq_in - 1) % PQ].crop[2]); }
+    // A game at 60 fps on the link at 120 Hz (link_sync runs it there on a screen that shows 120 Hz): two ticks a present, as 30 fps on 60 Hz ticks. The first comes
+    // after ticks with nothing to show and starts the history again: its own pictures until three came in time, the second tick of each held
+    g_tick_dt = 1 / 120.0; for (int i = 0; i < 60; i++) @autoreleasepool { tick(); }   // (the pool: a tick's unused drawable goes back to the layer, which has three)
+    CHECK("the link's tick interval follows 120 Hz ticks", fabs(g_fg_tick - 1 / 120.0) < 5e-4);
+    { int order120 = 1, paused120 = 1;
+      for (int i = 40; i < 48; i++) @autoreleasepool {
+          tex_t t = frame(i); present_enqueue(&t, 1 / 60.0, NULL, 0); copied();
+          int k = last_slot(); uint64_t gen = g_snap[k].gen_ok ? g_snap[k].gen_serial : 0, own = g_snap[k].serial;
+          uint64_t a = tick(), b = tick();
+          printf("60 fps present %d on 120 Hz ticks: showed %llx %llx (generated %llx, own %llx)\n", i, (unsigned long long)a, (unsigned long long)b, (unsigned long long)gen, (unsigned long long)own);
+          if (i < 43) paused120 &= a == own && !b;
+          else if (i > 43) order120 &= gen && a == gen && b == own;
+      }
+      CHECK("60 fps on 120 Hz ticks: its own pictures, each held two ticks, until three came in time", paused120);
+      CHECK("60 fps on 120 Hz ticks: each present's generated frame, then its own picture", order120); }
     present_drop_for_suspend(); mtl_drain();
     printf("frame generation: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }
