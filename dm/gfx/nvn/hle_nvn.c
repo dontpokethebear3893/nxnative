@@ -2286,13 +2286,10 @@ static void vrr_pace_tick(const win_t *o, uint64_t call, uint64_t f) {
 // Variable refresh, once per present after the cap (c) is known: in fullscreen on a screen that has it, for a game whose profile says its stubs take a fractional step (vrr on, state +0x300),
 // frames go to the screen when they are done instead of on the display link's ticks, at most c a second, and the game steps by the time they really take (fstep_tick). Off during a
 // movie or a 30 fps cap (c below 60) and under the game's own fixed step (fstep_tick). DM_PRESENT_VRR: 0 never, 1 also in a window (for tests). The display link goes back to its mode when it ends
-int front_fullscreen(void); int front_screen_variable_refresh(void);   // front_mac.m, weak defaults in nvn_mtl.m
 extern int g_dm_present_link;
-static int fps_high(void);
 static void vrr_tick(int c) {
-    static int env = -2, link_env = -1, link0 = -1;
-    if (env == -2) { const char *e = getenv("DM_PRESENT_VRR"); env = e ? atoi(e) : -1; link_env = getenv("DM_PRESENT_LINK") != NULL; link0 = g_dm_present_link; }
-    int vrr = DM_GAME_VRR && dm_fps_state && c >= 60 && !link_env && env && (env == 1 || (front_fullscreen() && front_screen_variable_refresh()));
+    static int link0 = -1; if (link0 < 0) link0 = g_dm_present_link;
+    int vrr = c >= 60 && vrr_can();
     static int was = -1;
     if (vrr != was) {
         LOG("[nvn] variable refresh %s", vrr ? "on: frames are shown when done, the game steps by their real time" : "off: frames follow the display link's ticks");
