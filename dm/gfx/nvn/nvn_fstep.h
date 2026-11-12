@@ -79,6 +79,54 @@ static inline double nvn_fstep_vrr_steps(double last, double before, double top)
 static inline int nvn_fstep_vrr_interval(double vsyncs) { int n = (int)(vsyncs + 0.5); return n < 1 ? 1 : n; }
 static inline float nvn_fstep_vrr_ratio(double vsyncs) { return (float)(vsyncs / 2); }
 
+// Variable refresh at the cap: the pictures waiting for the screen. The game makes a frame every period of the cap and the screen shows one every period, so nothing ever shortens the
+// wait between them: each refresh the system repeats leaves one more finished picture waiting, until the layer's drawables are all taken, and from then on every repeat stalls the game
+// for a whole refresh. So when the time from a present's call to its picture on the screen (the latency, in periods of the cap) has grown FSTEP_VRR_START past the target, the frames
+// after it start a little later than the cap's period until it is back at the target (a drain): 5 to 15% of a period a frame, about ten frames for one repeated refresh. A repeat is
+// then taken up by a free drawable instead of the game. Frames never start sooner than the cap's period.
+// A screen whose shortest latency is above the target cannot be drained: there the pictures do not wait, each is just in time, and starting frames later makes one miss its refresh.
+// The latency alone does not tell the two apart, so a drain that a repeat cuts short, or that one follows within FSTEP_VRR_GRACE presents, counts as bad, and FSTEP_VRR_BAD of those in
+// a row pause the pacing (FSTEP_VRR_PAUSE presents, doubled each time up to FSTEP_VRR_PAUSE_MAX; a drain that holds starts over)
+#define FSTEP_VRR_LAT 1.9        // the target: with three drawables nothing waited for one below about 2.25 periods, and the lowest latency measured at 120 fps was 1.15 to 1.43
+#define FSTEP_VRR_START 0.9      // a drain starts this far above the target: a repeat on a drained queue starts one (target + 1), but frames that are slow on their own, whose latency
+                                 // runs from its lowest to a period above, start none while that lowest is under target + START - 1; the game stalled from about 4 periods
+#define FSTEP_VRR_JUMP 0.6       // a rise this large from one shown picture to the next is a repeated refresh
+#define FSTEP_VRR_GRACE 6
+#define FSTEP_VRR_BAD 4
+#define FSTEP_VRR_PAUSE 240
+#define FSTEP_VRR_PAUSE_MAX 19200
+typedef struct {
+    int drain, bad;                  // a drain is running; the bad drains in a row
+    uint32_t grace, off, backoff;    // presents left in which a repeat counts against the last drain; presents left of a pause, and the last pause's length (0 = none since a drain held)
+    double prev, last;               // the latency of the last picture shown; the last answer
+    uint64_t drains, cut, pauses;    // statistics for the log: drains that reached the target, repeats that made one bad, pauses
+} nvn_vrr_pace;
+// Once per present. lat: the latency of the newest picture shown if it is new since the last call, else 0. cur: the latency to expect of the frame just presented (that picture's, less
+// what the frames since have started later than the cap's period; 0 = unknown). The answer: the shortest time from the next frame's start to the one after, in periods of the cap
+static inline double nvn_fstep_vrr_pace(nvn_vrr_pace *s, double lat, double cur, double target) {
+    int jump = lat > 0 && s->prev > 0 && lat - s->prev > FSTEP_VRR_JUMP;
+    double committed = s->last > 1 ? s->last - 1 : 0;   // the frame now starting was paced by the last answer
+    if (lat > 0) s->prev = lat;
+    s->last = 1;
+    if (s->off) { s->off--; return 1; }
+    if (jump && (s->drain || s->grace)) {
+        s->cut++; s->grace = 0;
+        if (++s->bad >= FSTEP_VRR_BAD) {
+            s->bad = 0; s->drain = 0; s->pauses++;
+            s->backoff = !s->backoff ? FSTEP_VRR_PAUSE : s->backoff >= FSTEP_VRR_PAUSE_MAX / 2 ? FSTEP_VRR_PAUSE_MAX : s->backoff * 2;
+            s->off = s->backoff; return 1;
+        }
+    }
+    if (s->grace && !--s->grace) { s->bad = 0; s->backoff = 0; }   // the drain held
+    if (!(cur > 0)) { s->drain = 0; return 1; }
+    cur -= committed;
+    if (!s->drain && cur > target + FSTEP_VRR_START) s->drain = 1;
+    else if (s->drain && cur <= target) { s->drain = 0; s->drains++; s->grace = FSTEP_VRR_GRACE; }
+    if (!s->drain) return 1;
+    double e = 0.25 * (cur - target);
+    return s->last = 1 + (e < 0.05 ? 0.05 : e > 0.15 ? 0.15 : e);
+}
+
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
 static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->cn >= FSTEP_RUN && s->ccur <= FSTEP_SAME * s->cref; }
 
