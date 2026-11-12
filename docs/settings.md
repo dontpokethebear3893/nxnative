@@ -27,6 +27,8 @@ Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and
 
 On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Luigi: Brothership) also offers **120 fps**. It needs a screen that shows 120 Hz, and uses more GPU and power. When frames do not fit, during movies, or on a slower screen, the game drops to 60 for a while, so it keeps its real speed. If you see the frame rate move between 60 and 120 and would rather it stayed still, choose 60.
 
+The same games offer **90 fps**, a limit for a variable-refresh screen, which can show a frame as soon as it is done. A display link on a 120 Hz screen has no even 90, so the limit holds only where frames are shown that way; everywhere else the game runs at 60.
+
 ### Dynamic resolution
 
 Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).

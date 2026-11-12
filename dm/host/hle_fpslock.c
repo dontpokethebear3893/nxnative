@@ -258,9 +258,9 @@ void dm_fps_lock_tick(void) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !uq.base && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
-        if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
-        high = t == 120;
+        if (t != 0 && t != 30 && t != 60 && t != 90 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60, 90 or 120; leaving the game's frame limit", e); t = 0; }
+        if ((t == 90 || t == 120) && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=%d: this game's speed above 60 fps is not checked (profile fps_max); running at 60", t); t = 60; }
+        high = t == 90 || t == 120;
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n && !uq.base) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
