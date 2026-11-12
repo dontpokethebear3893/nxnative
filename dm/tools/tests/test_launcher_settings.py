@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -110,7 +111,32 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(listed['schema'], 1)
         self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_LANG', 'DM_RUMBLE'])
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
-        self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
+        self.assertFalse({'level', 'needs'} & set(rows['DM_PRESENT_UPSCALE']), 'a row without meta has no optional fields')
+
+    def test_performance_hud_is_offered_only_without_metalfx_scene_upscaling(self):
+        # With MetalFX's scene upscaling and Apple's HUD both on, Breath of the Wild had a GPU fault every few minutes: the host keeps the HUD off then (front.h front_hud_on),
+        # the Scene upscaling row says so, and the HUD's row is drawn only while that row is Game's own (a game without the row keeps its HUD row: LauncherModel.visible)
+        rows, other = build(BOTW, 'nvn'), build(WONDER, 'nvn')
+        self.assertEqual(rows['DM_METAL_HUD']['needs'], 'DM_SCENE_UPSCALE=game')
+        self.assertIn('MetalFX turns the Performance HUD off', rows['DM_SCENE_UPSCALE']['note'])
+        self.assertNotIn('DM_SCENE_UPSCALE', other); self.assertIn('DM_METAL_HUD', other)
+
+    def test_host_keeps_the_hud_off_with_metalfx_scene_upscaling(self):
+        src = '#include <stdio.h>\n#include "front.h"\nint main(void) { front_hud_env(); printf("%d %s\\n", front_hud_on(), getenv("MTL_HUD_ENABLED") ? "set" : "unset"); return 0; }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            def run(has_key, **env):
+                (Path(tmp) / 'game_profile.h').write_text('#pragma once\n' + (f'#define DM_GAME_SCENE_UPSCALE_N {has_key}\n' if has_key is not None else ''))
+                (Path(tmp) / 't.c').write_text(src)
+                subprocess.run(['clang', '-I', tmp, '-I', str(ROOT / 'dm/host'), '-o', str(Path(tmp) / 't'), str(Path(tmp) / 't.c')], check=True)
+                e = {k: v for k, v in os.environ.items() if k not in ('DM_METAL_HUD', 'DM_SCENE_UPSCALE', 'MTL_HUD_ENABLED')}; e.update(env)
+                return subprocess.run([str(Path(tmp) / 't')], env=e, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(run(1, DM_METAL_HUD='1'), '0 unset', 'MetalFX is the default for a game with the key')
+            self.assertEqual(run(1, DM_METAL_HUD='1', DM_SCENE_UPSCALE='metalfx'), '0 unset')
+            self.assertEqual(run(1, DM_METAL_HUD='1', DM_SCENE_UPSCALE='game'), '1 set')
+            self.assertEqual(run(1, DM_METAL_HUD='2'), '1 set', 'DM_METAL_HUD=2 shows it all the same')
+            self.assertEqual(run(1, DM_METAL_HUD='0', DM_SCENE_UPSCALE='game'), '0 unset')
+            self.assertEqual(run(0, DM_METAL_HUD='1'), '1 set', 'a game without the key')
+            self.assertEqual(run(None, DM_METAL_HUD='1'), '1 set', 'a hand-written profile without the macro')
 
     def test_meta_is_strict(self):
         self.assertEqual(settings.meta('level=basic; needs=DM_RUMBLE=1', 1), {'level': 'basic', 'needs': 'DM_RUMBLE=1'})

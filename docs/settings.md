@@ -82,7 +82,7 @@ flowchart LR
 Shown for games whose profile names the draw that stretches the 3D scene to the output size: Breath of the Wild. It matters only when [Render scale](#render-scale) is below 100%: the game then draws its 3D scene smaller and stretches it to the output size before drawing the HUD on top. **MetalFX**, the default, has Apple's MetalFX spatial scaler do that step, so edges and foliage stay sharper than the game's own soft stretch; the HUD is drawn afterwards at full size either way. **Game's own** keeps the game's stretch. At 100% there is nothing to scale and the setting does nothing.
 
 - **Cost:** about 0.7 ms of GPU time a frame on an M5 Max, scaling 3840x2160 to 5120x2880 (75% of 5K). At a 120 fps target that was 107–110 fps where the game's own stretch gave 114–118.
-- **With the Performance HUD on, expect a hitch every few minutes.** On screen at 120 fps with variable refresh, runs with MetalFX and the HUD both on had a GPU fault about once in four to five minutes: part of one frame is dropped and that frame takes about 100 ms, then the game goes on. With the HUD off, or with Game's own, there was none. Turn the Performance HUD off while this is set to MetalFX.
+- **MetalFX turns the Performance HUD off.** With both on, the game had a GPU fault about once in four to five minutes (on screen at 120 fps with variable refresh): part of one frame is dropped and that frame takes about 100 ms. With either one off there was none. So while this is set to MetalFX the game starts without the [Performance HUD](#performance-hud), whatever that setting says, and the settings screen does not offer it; with Game's own it is offered again.
 
 
 ### Game language
@@ -221,7 +221,7 @@ flowchart LR
 
 ### Performance HUD
 
-Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
+Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play. Not offered, and not shown, while [Scene upscaling](#scene-upscaling) is set to MetalFX.
 
 ### Reset to tested defaults
 
