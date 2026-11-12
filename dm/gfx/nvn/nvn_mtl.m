@@ -16443,6 +16443,41 @@ static int fg_on(void) {
     else if (v) MLOG("frame generation (DM_FRAMEGEN=1): MetalFX's frame interpolator makes a frame between each two presents, shown on the display link between them");
     return g_fg_mode = v;
 }
+static NSUInteger g_fg_key_w(void), g_fg_key_h(void);   // the interpolator's size (below)
+// Frame generation steps aside when its frames do not come in time. The interpolation runs on the game's queue after each frame's work, so one that does not fit its tick
+// makes the presents late too, and late presents raised the frame step's hold (hle_nvn.c fstep_tick): Breath of the Wild at 5120x2880 on a 120 Hz screen went from 60 drawn
+// to 30 and then 20 as it entered the world and stayed there, the interpolation at 17-20 ms beside 16-18 ms of the game's own GPU time (the GPU's clock had followed the
+// lighter load down), every frame late at 20 fps and no trial back. So while frames are generated the hold does not rise: three late frames in a row stop the generation
+// instead (mtl_fg_step_aside), for 2 s the first time and twice as long each time it has to stop again within 10 s of coming back, up to 60 s; one that has run 30 s starts
+// again from 2 s. Meanwhile no interpolation is encoded, the game's own frames are shown, and the hold follows the frames as it does without frame generation.
+// DM_FRAMEGEN_ASIDE=0 leaves the generation on whatever the frames do (as before, to compare)
+#define FG_ASIDE_NS 2000000000ull
+#define FG_ASIDE_MAX_NS 60000000000ull
+static _Atomic uint64_t g_fg_aside_until;   // no interpolation before this time (now_ns)
+static uint64_t g_fg_aside_ns = FG_ASIDE_NS, g_fg_aside_n;   // the next pause's length; pauses so far
+static _Atomic uint64_t g_fg_gen_since;   // when the generation last came back (0 = it has not been off)
+static int fg_aside_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FRAMEGEN_ASIDE"); v = !(e && !strcmp(e, "0")); } return v; }
+static double g_fg_gpu_last;   // the last interpolation's GPU time in seconds (tests, and the step-aside line)
+// Whether frames are being generated now: on, and not stepped aside
+int mtl_fg_generating(void) {
+    if (!fg_on()) return 0;
+    uint64_t until = atomic_load(&g_fg_aside_until); if (!until) return 1;
+    uint64_t t = now_ns(); if (t < until) return 0;
+    uint64_t z = 0; if (atomic_compare_exchange_strong(&g_fg_gen_since, &z, t) && g_fg_aside_n <= 30) MLOG("frame generation: on again after %.0f s", g_fg_aside_ns / 1e9);
+    return 1;
+}
+// Three late frames in a row while frames were generated (hle_nvn.c fstep_tick). gpu_ms: the last frame's GPU time. Returns 0 when the generation stays on (DM_FRAMEGEN_ASIDE=0)
+int mtl_fg_step_aside(double gpu_ms) {
+    if (!fg_on() || !fg_aside_on()) return 0;
+    uint64_t t = now_ns(), since = atomic_load(&g_fg_gen_since);
+    if (since && t - since >= 30000000000ull) g_fg_aside_ns = FG_ASIDE_NS;   // it held for a while: a hitch, not a load it cannot carry
+    else if (since && t - since < 10000000000ull) g_fg_aside_ns = g_fg_aside_ns * 2 < FG_ASIDE_MAX_NS ? g_fg_aside_ns * 2 : FG_ASIDE_MAX_NS;
+    atomic_store(&g_fg_gen_since, 0); atomic_store(&g_fg_aside_until, t + g_fg_aside_ns);
+    if (++g_fg_aside_n <= 30 || !(g_fg_aside_n % 20))
+        MLOG("frame generation: stepped aside for %.0f s: three late frames in a row with it on (the frame's GPU time %.1f ms, the last interpolation's %.1f ms at %lux%lu); the game's own frames are shown meanwhile (#%llu)",
+             g_fg_aside_ns / 1e9, gpu_ms, g_fg_gpu_last * 1e3, (unsigned long)g_fg_key_w(), (unsigned long)g_fg_key_h(), (unsigned long long)g_fg_aside_n);
+    return 1;
+}
 int mtl_snap_on(void) {
     static int v = -1; if (v >= 0) return v;
     const char *e = getenv("DM_PRESENT_SNAP");
@@ -16455,8 +16490,8 @@ int mtl_snap_on(void) {
 static id<MTL4FXFrameInterpolator> g_fg_fi; static id<MTL4Compiler> g_fg_comp;
 static id<MTL4CounterHeap> g_fg_heap;   // per ring slot, timestamps before and after its interpolation (fg_encode, read by the snapshot's commit feedback)
 static id<MTLBuffer> g_fg_tsbuf;   // 8 bytes the encoders holding those timestamps copy 4 of: a timestamp in an encoder without work reads 0
-static double g_fg_gpu_last;   // the last interpolation's GPU time in seconds (tests)
 static NSUInteger g_fg_key[3]; static int g_fg_bad;   // the interpolator's colour format, width and height; g_fg_bad: MetalFX made none for them
+static NSUInteger g_fg_key_w(void) { return g_fg_key[1]; } static NSUInteger g_fg_key_h(void) { return g_fg_key[2]; }
 static id<MTLTexture> g_fg_depth, g_fg_motion; static int g_fg_clear;   // the constant inputs (far depth, no motion), cleared by the first command buffer after they are made
 static uint64_t g_fg_seq;   // presents that could be copied (present_enqueue), for g_snap[].seq
 static int g_fg_warm;   // interpolations since the history last started again
@@ -16499,6 +16534,10 @@ static id<MTL4FXFrameInterpolator> fg_for(id<MTLTexture> col) {
 // it then): Ocarina of Time passes the window's crop with every present, and with crops left out its generated frames stayed at 3136x1440 on an iPhone whose screen is 2622x1206 (log 73).
 // cw, ch: the picture's size (its crop); 1 with *tw, *th the copy's size when the picture is shown at 95 % of it or less
 static int fg_shown_size(NSUInteger cw, NSUInteger ch, NSUInteger *tw, NSUInteger *th) {
+    // DM_FRAMEGEN_SHOWN_SIZE=0 (diagnostic): the copy keeps the game's size, so the interpolation costs what it does on a screen as large as the picture (a 5120x2880
+    // picture on a MacBook's own screen is generated at 3472x1953 otherwise)
+    static int keep = -1; if (keep < 0) { const char *e = getenv("DM_FRAMEGEN_SHOWN_SIZE"); keep = e && !strcmp(e, "0"); if (keep) MLOG("frame generation: frames are generated at the game's size, not the size shown (DM_FRAMEGEN_SHOWN_SIZE=0)"); }
+    if (keep) return 0;
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); if (!layer || !cw || !ch) return 0;
     CGSize ds = layer.drawableSize; if (ds.width < 16 || ds.height < 16) return 0;
     double s = fmin(ds.width / cw, ds.height / ch);   // fitted into the drawable, as the present draws it
@@ -16698,7 +16737,7 @@ static uint64_t snap_take(const tex_t *t, double period, const int crop[4], int 
     if (fg_on()) {   // the frame between the previous present and this one (frame generation): only for presents held two ticks or more, as the display link shows it
         int pk = (int)((atomic_load(&g_snap_next) + (uint64_t)g_snap_n - 1) % (uint64_t)g_snap_n);
         g_snap[k].seq = g_fg_seq;
-        if (fg_two_ticks(period)) fg_encode(cb, k, pk, period); else g_fg_warm = 0;
+        if (fg_two_ticks(period) && mtl_fg_generating()) fg_encode(cb, k, pk, period); else { if (g_fg_warm) g_fg_resets++; g_fg_warm = 0; }   // (stepped aside: the history starts again when it comes back)
     }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = nil;

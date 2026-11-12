@@ -208,6 +208,24 @@ int main(void) { @autoreleasepool {
       }
       CHECK("60 fps on 120 Hz ticks: its own pictures, each held two ticks, until three came in time", paused120);
       CHECK("60 fps on 120 Hz ticks: each present's generated frame, then its own picture", order120); }
+    // Stepping aside (mtl_fg_step_aside: three late frames in a row with it on): no interpolation is encoded until the pause is over, the history then starts again, and a
+    // pause that follows within 10 s of the last one's end is twice as long; after 30 s of generated frames it is 2 s again
+    { CHECK("frames are generated until it steps aside", mtl_fg_generating());
+      CHECK("it steps aside for 2 s", mtl_fg_step_aside(5.0) && !mtl_fg_generating() && g_fg_aside_ns == FG_ASIDE_NS);
+      atomic_store(&g_fg_aside_until, now_ns() + 3600000000000ull);   // (the ticks below can wait a second each for a drawable: the pause must not run out under them)
+      int none = 1;
+      for (int i = 50; i < 54; i++) @autoreleasepool { tex_t t = frame(i); present_enqueue(&t, 1 / 60.0, NULL, 0); copied(); none &= !g_snap[last_slot()].gen_ok && !g_pq[(g_pq_in - 1) % PQ].gen; tick(); tick(); }
+      CHECK("stepped aside: presents carry no generated frame", none);
+      atomic_store(&g_fg_aside_until, 1);   // the pause is over
+      CHECK("frames are generated again once the pause is over", mtl_fg_generating() && atomic_load(&g_fg_gen_since));
+      int warm[4];
+      for (int i = 54; i < 58; i++) @autoreleasepool { tex_t t = frame(i); present_enqueue(&t, 1 / 60.0, NULL, 0); copied(); warm[i - 54] = g_snap[last_slot()].gen_ok; tick(); tick(); }
+      CHECK("back on: the history starts again, generated frames from the third present", !warm[0] && !warm[1] && warm[2] && warm[3]);
+      CHECK("stepping aside again at once doubles the pause", mtl_fg_step_aside(5.0) && g_fg_aside_ns == 2 * FG_ASIDE_NS);
+      atomic_store(&g_fg_aside_until, 1); mtl_fg_generating();
+      atomic_store(&g_fg_gen_since, now_ns() - 31000000000ull);   // it has run for 31 s
+      CHECK("after 30 s of generated frames the pause is 2 s again", mtl_fg_step_aside(5.0) && g_fg_aside_ns == FG_ASIDE_NS);
+      atomic_store(&g_fg_aside_until, 1); mtl_fg_generating(); }
     present_drop_for_suspend(); mtl_drain();
     printf("frame generation: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

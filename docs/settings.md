@@ -33,6 +33,7 @@ On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Lui
 
 - **Cost:** some GPU time for each made frame (a few milliseconds), and more input delay than real 60 fps: each frame waits half a frame (about 17 ms) for the one made before it. Against plain 30 fps the delay can even be shorter, as the screen then updates every 17 ms instead of every 33. Fast motion can smear or wobble, mostly at the edges of moving things; the HUD can too when a lot moves behind it.
 - **When frames drop** (a hot phone, a busy scene), it pauses and shows the game's own frames until they come in time again, so the picture does not flicker between made and real frames.
+- **When the made frames do not come in time** (a very large picture: 5K on a 120 Hz screen), it steps aside for a few seconds, longer each time it happens again, and the game keeps its own frame rate meanwhile. The made frames cost more the larger the picture is shown.
 - **When to use it:** when 60 fps makes the phone hot or drops frames, and 30 looks too choppy. It needs iOS 26 or macOS 26 and a device with MetalFX frame interpolation; without it the game shows its own 30 frames.
 - **On a Mac:** the same, on a 60 Hz screen or one that runs at a multiple of 60.
 
