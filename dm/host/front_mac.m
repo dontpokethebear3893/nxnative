@@ -1524,7 +1524,8 @@ void front_run(void (*guest)(void)) {
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
-        if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
+        if (front_hud_on()) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
+        else if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD kept off while MetalFX scales the scene (DM_SCENE_UPSCALE; DM_METAL_HUD=2 shows it all the same)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
         // DM_WINDOW_SCREEN=builtin (or a screen's name as System Settings shows it): open the window on that screen instead of the main one, so a test run stays off the

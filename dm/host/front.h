@@ -1,10 +1,25 @@
 // Host front end (Mac: front_mac.m; iOS: dm/ios separately implements the same-named interface).
 #pragma once
 #include <stdlib.h>
+#include <string.h>
+#if __has_include("game_profile.h")
+#include "game_profile.h"
+#endif
+#ifndef DM_GAME_SCENE_UPSCALE_N   // a test's hand-written profile without the key
+#define DM_GAME_SCENE_UPSCALE_N 0
+#endif
+// Whether Apple's performance HUD is to show (DM_METAL_HUD, the launcher's Performance HUD). Not while MetalFX scales the game's 3D scene (a profile with scene_upscale and
+// DM_SCENE_UPSCALE not game; nvn_mtl.m scene_up_prepare): with both on, Breath of the Wild had a GPU fault every four to five minutes, and none with either one off (the game's
+// README). DM_METAL_HUD=2 shows the HUD all the same, to look into that fault
+static inline int front_hud_on(void) {
+    const char *e = getenv("DM_METAL_HUD"); int v = e ? atoi(e) : 0;
+    if (!v) return 0;
+    const char *su = getenv("DM_SCENE_UPSCALE");
+    return v != 1 || !DM_GAME_SCENE_UPSCALE_N || (su && !strcmp(su, "game"));
+}
 // Metal reads HUD switches when the first device is made. Called before host preload and again after the launcher applies its settings; explicit environment values win.
 static inline void front_hud_env(void) {
-    const char *e = getenv("DM_METAL_HUD");
-    if (!e || !atoi(e)) return;
+    if (!front_hud_on()) return;
     setenv("MTL_HUD_ENABLED", "1", 0);
     // Spatial scaling has no temporal exposure: showing that HUD metric makes the MetalFX rows flicker.
     setenv("MTL_HUD_HIDE_METALFX_METRICS", "1", 0);

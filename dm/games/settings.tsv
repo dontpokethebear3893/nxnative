@@ -24,7 +24,7 @@ DM_OUTPUT_SIZE	choice	off=1600x900 (standard),1920x1080=1080p?platform:mac,2560x
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
-DM_SCENE_UPSCALE	choice	metalfx=MetalFX,game=Game's own	metalfx	DM_GAME_SCENE_UPSCALE_N!=0	Game	Scene upscaling	How the 3D scene is scaled to the output size when Render scale is below 100%.
+DM_SCENE_UPSCALE	choice	metalfx=MetalFX,game=Game's own	metalfx	DM_GAME_SCENE_UPSCALE_N!=0	Game	Scene upscaling	How the 3D scene is scaled to the output size when Render scale is below 100%. MetalFX turns the Performance HUD off.
 DM_SHADOW_SCALE	choice	100=100%,150=150%,200=200%	100	DM_GAME_SHADOW_MAPS_N!=0	Game	Shadow resolution	Sharper shadow edges. Uses a little more GPU time.
 DM_ANISO	choice	off=Game's own,2=2x,4=4x,8=8x,16=16x	off	gfxapi:nvn	Game	Anisotropic filtering	Sharper textures on ground and walls seen at an angle. Uses a little more GPU time.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
@@ -44,5 +44,5 @@ DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first st
 DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread
 DM_MEMORY_GB	range	2:12:2	2	fixups:GAME_HEAP&platform:mac	Performance	Game memory	More memory lets the game draw larger pictures. The Mac needs that much free memory as well.	unit=GB;first=Default
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0	Performance	Hold frames when late
-DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD
+DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD		needs=DM_SCENE_UPSCALE=game
 DM_GAME_MODE	toggle	-	0	platform:mac	Performance	Game Mode	Lets macOS give the game priority and read controllers faster. On some Macs it holds the GPU at its lowest clock.
