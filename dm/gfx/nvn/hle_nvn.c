@@ -1843,6 +1843,9 @@ void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
+static _Atomic int g_vrr;   // variable refresh in force (vrr_tick)
+static _Atomic uint64_t g_vrr_period;   // its shortest frame, ns: 1 / the frame step's cap
+static _Atomic uint64_t g_vrr_pace_ns;   // the shortest time from one frame's start to the next while pictures wait for the screen (vrr_pace_tick; 0 or less than the period: the period)
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
@@ -1862,6 +1865,11 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
             // frames are dropped as fast as they come and nothing frees a ring slot later, so the texture's slot time paces the game: unpaced, Breath of the Wild ran 3 to 4.5 times real time there.
             // Otherwise snapshots take the display link's wait below like any present. The wait for a free ring slot (mtl_snap_acquire_wait) alone did not pace: the link takes frames in
             // order and drops all but the newest two, and a dropped frame frees its slot, so Donkey Kong Bananza at the 30 fps cap ran 43-65 fps of game time and dropped about 110 of every 300 frames
+        else if (atomic_load(&g_vrr)) {   // variable refresh: the display link is off, and each frame starts at least one frame of the cap after the last one's. The swapchain's slot times below pace two textures in turn, which let frames through at 7 and 14 ms by turns
+            static uint64_t next; if (now_ns() < next) sleep_until_ns(next);
+            uint64_t per = atomic_load(&g_vrr_period), pace = atomic_load(&g_vrr_pace_ns);
+            next = now_ns() + (pace > per ? pace : per);
+        }
         else if (mtl_link_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
         else if (wait) sleep_until_ns(at);
         pace_ns = now_ns() - p0;
@@ -2193,10 +2201,16 @@ static int thermal_capped(void) {
 // below 120 Hz, while a movie plays (its pictures are paced for the Switch's 30 and 60) and under the thermal cap. No window (headless): nothing limits the rate but the pacer's clock.
 // A game with a frame step state page takes it only with fps_max 120 in its profile, whose stubs then read the step as a float (Breath of the Wild, state +0x300): on their own they hand the game whole vsyncs of 1/60 s
 // DM_FPS_TARGET=90 is the same mode with a lower top: no display link ticks 90 times a second on a 120 Hz screen, so it is a cap only where frames go to the screen when they are
-// done (present_when_done: a variable-refresh screen), and 60 everywhere else
+// done (vrr_can: variable refresh, below), and 60 everywhere else
 static int g_fps_high = -1, g_high_top = 120;   // the top: 120 or 90 (DM_FPS_TARGET)
 static _Atomic int g_high_cap = 60;
-static int present_when_done(void) { return 0; }   // nothing here presents off the display link's ticks yet, so a 90 fps limit runs at 60
+int front_fullscreen(void); int front_screen_variable_refresh(void);   // front_mac.m, weak defaults in nvn_mtl.m
+// Whether variable refresh may run (vrr_tick): the profile's vrr, a frame step state page, fullscreen on a screen that has it. DM_PRESENT_VRR: 0 never, 1 also in a window (for tests)
+static int vrr_can(void) {
+    static int env = -2, link_env;
+    if (env == -2) { const char *e = getenv("DM_PRESENT_VRR"); link_env = getenv("DM_PRESENT_LINK") != NULL; env = e ? atoi(e) : -1; }
+    return DM_GAME_VRR && dm_fps_state && !link_env && env && (env == 1 || (front_fullscreen() && front_screen_variable_refresh()));
+}
 static int fps_high(void) {
     int v = __atomic_load_n(&g_fps_high, __ATOMIC_RELAXED);
     if (v < 0) {
@@ -2213,11 +2227,60 @@ static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the f
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int top = g_high_top, done = top == 120 || present_when_done();   // 90: only where frames are shown when they are done
-    int ok = !win || front_screen_max_fps() >= 120, cap = ok && done && !dm_movie_playing() && !thermal_capped() ? top : 60;
-    static int was; if (cap != was) { LOG("[nvn] %d fps: cap %d → %d fps (%s)", top, was, cap, cap == top ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : !done ? "90 needs frames shown when they are done, on a variable-refresh screen" : dm_movie_playing() ? "movie playing" : "thermal state serious"); was = cap; }
+    int top = g_high_top, done = top == 120 || vrr_can();   // 90: only where frames are shown when they are done
+    int ok = !win || front_screen_max_fps() >= top, cap = ok && done && !dm_movie_playing() && !thermal_capped() ? top : 60;
+    static int was; if (cap != was) { LOG("[nvn] %d fps: cap %d → %d fps (%s)", top, was, cap, cap == top ? "the screen shows it" : !ok ? "the screen is slower" : !done ? "90 needs variable refresh: fullscreen on a screen that has it" : dm_movie_playing() ? "movie playing" : "thermal state serious"); was = cap; }
     atomic_store(&g_high_cap, cap);
-    if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
+    if (!link_env) mtl_link_mode_set(!win || front_screen_max_fps() >= 120 ? 2 : 1);
+}
+// Variable refresh, once per present after the cap (c) is known: in fullscreen on a screen that has it, for a game whose profile says its stubs take a fractional step (vrr on, state +0x300),
+// frames go to the screen when they are done instead of on the display link's ticks, at most c a second, and the game steps by the time they really take (fstep_tick). Off during a
+// movie or a 30 fps cap (c below 60) and under the game's own fixed step (fstep_tick). DM_PRESENT_VRR: 0 never, 1 also in a window (for tests). The display link goes back to its mode when it ends
+extern int g_dm_present_link;
+static void vrr_tick(int c) {
+    static int link0 = -1; if (link0 < 0) link0 = g_dm_present_link;
+    int vrr = c >= 60 && vrr_can();
+    static int was = -1;
+    if (vrr != was) {
+        LOG("[nvn] variable refresh %s", vrr ? "on: frames are shown when done, the game steps by their real time" : "off: frames follow the display link's ticks");
+        if (!vrr && was == 1 && !fps_high()) mtl_link_mode_set(link0);   // at 120 fps high_cap_tick sets the link's mode every present
+        was = vrr;
+    }
+    if (vrr) { atomic_store(&g_vrr_period, (uint64_t)(1e9 / c)); mtl_link_mode_set(0); }
+    atomic_store(&g_vrr, vrr);
+}
+// Variable refresh, once per present: the pace that keeps a drawable free (nvn_fstep_vrr_pace, nvn_fstep.h). At the cap the game and the screen run at the same rate, so each refresh the
+// system repeats left one more picture waiting until all three drawables were taken, and then every repeat stalled the game for a refresh (Breath of the Wild at 120 fps: 180 to 190
+// frames of 17 ms a minute while the system set the screen's brightness five times a second). The latency is the time from a present's call (call) to its picture on the screen, in periods
+// of the cap, of the newest present the system has reported; the frame just presented is expected that, less what the frames since started later than the cap's period.
+// DM_PRESENT_VRR_PACE: 0 = off (every frame starts a period after the last), another number = the latency drained to, in periods (default FSTEP_VRR_LAT)
+static void vrr_pace_tick(const win_t *o, uint64_t call, uint64_t f) {
+    static uint64_t calls[16], fed, was_period, pauses, sum_n; static nvn_vrr_pace s; static double target = -1, sum_ms, max_ms;
+    if (target < 0) {
+        const char *e = getenv("DM_PRESENT_VRR_PACE"); target = e ? atof(e) : FSTEP_VRR_LAT; if (target < 0) target = 0;
+        if (e) LOG("DM_PRESENT_VRR_PACE: %s", target > 0 ? "the latency drained to is set" : "off, every frame starts one period of the cap after the last");
+    }
+    uint64_t p = o->presents, period = atomic_load(&g_vrr_period);
+    calls[p % 16] = call;
+    if (!(target > 0) || !atomic_load(&g_vrr) || !period) { if (was_period) { memset(&s, 0, sizeof s); was_period = 0; atomic_store(&g_vrr_pace_ns, 0); } return; }
+    if (period != was_period) { memset(&s, 0, sizeof s); was_period = period; fed = p; sum_ms = max_ms = 0; sum_n = 0; }
+    uint64_t n = 0; double lat = 0, cur = 0;
+    for (uint64_t k = 1; k <= 12 && k < p && !n; k++) {
+        double at = mtl_presented_time(p - k), l = at > 0 ? (at * 1e9 - (double)calls[(p - k) % 16]) / (double)period : 0;
+        if (l > 0) { n = p - k; lat = l; }
+    }
+    if (n) cur = lat - ((double)(call - calls[n % 16]) / (double)period - (double)(p - n));
+    double scale = nvn_fstep_vrr_pace(&s, n > fed ? lat : 0, cur, target);
+    if (n > fed) fed = n;
+    atomic_store(&g_vrr_pace_ns, (uint64_t)((double)period * scale));
+    trow(f, "@vrr_lat", cur); trow(f, "@vrr_pace", scale);
+    if (s.pauses != pauses) { pauses = s.pauses; LOG("[nvn] variable refresh pace: paused for %u presents, %d drains in a row ended in a repeated refresh (latency %.1f ms)", s.off, FSTEP_VRR_BAD, cur * (double)period / 1e6); }
+    if (cur > 0) { double ms = cur * (double)period / 1e6; sum_ms += ms; sum_n++; if (ms > max_ms) max_ms = ms; }
+    if (p % 1800 == 0 && sum_n) {
+        LOG("[nvn] variable refresh pace up to present %llu: present to screen %.1f ms mean, %.1f max over the last 1800 (drained to %.1f); so far drains %llu, bad ones %llu, pauses %llu", (unsigned long long)p,
+            sum_ms / (double)sum_n, max_ms, target * (double)period / 1e6, (unsigned long long)s.drains, (unsigned long long)s.cut, (unsigned long long)s.pauses);
+        sum_ms = max_ms = 0; sum_n = 0;
+    }
 }
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
@@ -2373,6 +2436,17 @@ static void fstep_tick(const win_t *o, int c) {
     int kmin = fstep_hz() / c, kmax = ticks ? (!win || front_screen_max_fps() >= 120 ? FSTEP_TICKS_MAX : 2) : fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
          kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) * (ticks ? 2 : 1) : 0;   // the game's override is in vsyncs
+    if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x300), 0, __ATOMIC_RELAXED);   // no fractional step unless variable refresh writes one below
+    if (atomic_load(&g_vrr) && !fixed) {   // variable refresh: no hold to decide; the next frame steps by the time the last frames took (the game's own fixed step keeps its hold)
+        static double before; double t = nvn_fstep_vrr_steps(shown, before, FSTEP_MAX * fstep_hz() / 60.0); before = shown > 0 ? shown : before;
+        double vs = t * 60.0 / fstep_hz();   // in 1/60 s vsyncs
+        g_fs.k = g_fs.step = g_fs.kmin = 1; atomic_store(&g_fs_k, 1);
+        float r = nvn_fstep_vrr_ratio(vs); uint32_t b; memcpy(&b, &r, sizeof b);
+        __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)nvn_fstep_vrr_interval(vs), __ATOMIC_RELAXED); __atomic_store_n((uint32_t *)(dm_fps_state + 0x300), b, __ATOMIC_RELAXED);
+        static double sum, real; static uint64_t nf; sum += t; real += shown; nf++;
+        if (nf >= 1800) { LOG("[nvn] variable refresh: %.1f fps, game time %.2f s in %.2f s (%.3f of real time)", nf / (real / fstep_hz()), sum / fstep_hz(), real / fstep_hz(), sum / real); sum = real = 0; nf = 0; }
+        return;
+    }
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
@@ -2451,6 +2525,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (fps_high()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
+    vrr_tick(c);
     if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
@@ -2486,6 +2561,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
       if (fin) nvn_queue_finish((queue_t *)q); }
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
+    vrr_pace_tick(o, t0, f);
     if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
         static unsigned isub = ~0u; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
         if (isub == ~0u) for (isub = 0; isub < NVN_NFUNC && strcmp(nvn_names[isub], "nvnQueueSubmitCommands"); isub++) {}
