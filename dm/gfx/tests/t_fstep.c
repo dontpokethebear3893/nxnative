@@ -22,7 +22,49 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 // frames among frames on time are paid back by the step and keep hold 1 (below)
 static void hitch(sim *m) { run(m, 6, 1.6, 1, 3, 0); }
 
+// The variable refresh pace (nvn_fstep_vrr_pace) against a model of the latency, in periods of the cap: a frame's latency is the one before's, less what it started later than a
+// period, plus one for each refresh the system repeats before it; below the screen's shortest latency (lo) the picture misses its refresh and waits for the next. A frame takes nat
+// periods on its own. The answer at present p paces the start of frame p + 2, and a picture's latency is known once it is on the screen
+#define START_TOP (FSTEP_VRR_START + 1)
+typedef struct { nvn_vrr_pace s; double L[20000], iv[20000], ans[20000]; int misses; double pace_sum, top, low; int paced; } vsim;
+static void vrun(vsim *m, int frames, double start, double lo, double nat, int rep_every, double target) {
+    memset(m, 0, sizeof *m); m->L[0] = m->L[1] = start; m->iv[0] = m->iv[1] = 1; m->ans[0] = m->ans[1] = 1; m->low = 99;
+    for (int p = 1; p < frames - 2; p++) {
+        int n = 0; for (int k = p - 1; k > 0 && !n; k--) if (k + m->L[k] + 0.3 <= p) n = k;
+        double cur = 0; static int fed; if (p == 1) fed = 0;
+        if (n) { cur = m->L[n]; for (int k = n + 1; k <= p; k++) cur -= m->iv[k] - 1; }
+        m->ans[p] = nvn_fstep_vrr_pace(&m->s, n > fed ? m->L[n] : 0, cur, target); if (n > fed) fed = n;
+        if (m->ans[p] > 1) m->paced++;
+        m->pace_sum += m->ans[p];
+        int k = p + 1;   // the next frame: paced by the answer one present back
+        m->iv[k] = m->ans[p - 1] > nat ? m->ans[p - 1] : nat;
+        m->L[k] = m->L[k - 1] - (m->iv[k] - 1) + (rep_every && k % rep_every == 0);
+        while (m->L[k] < lo) { m->L[k] += 1; m->misses++; }
+        if (p > frames / 2) { if (m->L[k] > m->top) m->top = m->L[k]; if (m->L[k] < m->low) m->low = m->L[k]; }
+    }
+}
+
 int main(void) {
+    {   // the variable refresh pace: the pictures waiting for the screen (target 1.9 periods, a drain starts above 2.8)
+        static vsim m; nvn_vrr_pace z = {0}; double T = FSTEP_VRR_LAT;
+        check(nvn_fstep_vrr_pace(&z, 0, 0, T) == 1 && nvn_fstep_vrr_pace(&z, 1.4, 1.4, T) == 1 && nvn_fstep_vrr_pace(&z, 2.7, 2.7, T) == 1, "variable refresh pace: an unknown latency and one under the start keep the cap's period");
+        double a = nvn_fstep_vrr_pace(&z, 3.7, 3.7, T), b = nvn_fstep_vrr_pace(&z, 0, 2.4, T), c = nvn_fstep_vrr_pace(&z, 0, 1.97, T);
+        check(a == 1.15 && b > 1.08 && b < 1.09 && c == 1 && z.drains == 1, "variable refresh pace: a drain starts 0.9 above the target, slows 5 to 15% a frame and ends at the target");
+        vrun(&m, 6000, 1.4, 1.2, 1, 0, T); check(!m.paced && !m.misses && m.top == 1.4, "variable refresh pace: a short latency with no repeats is left alone");
+        vrun(&m, 6000, 3.5, 1.2, 1, 0, T); check(m.s.drains == 1 && m.paced < 20 && m.top <= T && m.low > T - 0.1 && !m.misses && !m.s.pauses, "variable refresh pace: a full queue is drained once to the target, in under 20 frames");
+        vrun(&m, 12000, 3.5, 1.2, 1, 24, T); check(m.top <= T + 1 && m.low > T - 0.1 && !m.s.pauses && !m.s.cut && !m.misses && m.s.drains > 240, "variable refresh pace: a repeated refresh every 24 frames is drained each time, the latency stays under target + 1");
+        check(m.pace_sum / 12000 < 1 + 1.0 / 24 + 0.002, "variable refresh pace: draining costs what the repeats take, one frame in 24");
+        vrun(&m, 12000, 3.5, 1.2, 1, 18, T); check(m.top <= T + 1 && !m.s.pauses && !m.misses, "variable refresh pace: repeats every 18 frames are still drained without a pause");
+        vrun(&m, 12000, 3.5, 1.2, 1, 12, T); check(m.s.pauses && !m.misses && m.paced < 12000 / 10, "variable refresh pace: repeats every 12 frames cut every drain short: the pace pauses, as without it");
+        vrun(&m, 12000, 3.0, 2.3, 1, 0, T); check(m.s.pauses >= 1 && m.s.pauses <= 6 && m.misses <= 4 * (int)m.s.pauses + 4, "variable refresh pace: a shortest latency above the target pauses the pace after four missed refreshes");
+        check(m.paced < 12000 / 20, "variable refresh pace: and frames are then slowed less than one in 20");
+        vrun(&m, 12000, 3.0, T + 0.03, 1, 0, T); check(m.s.pauses && m.misses <= 4 * (int)m.s.pauses + 4 && m.paced < 12000 / 20, "variable refresh pace: a shortest latency just above the target as well (the miss after the drain counts)");
+        vrun(&m, 12000, 3.0, T - 0.07, 1, 0, T); check(!m.misses && m.s.drains == 1 && !m.s.pauses, "variable refresh pace: one just below it is drained without a miss");
+        vrun(&m, 12000, 1.5, 1.4, 1.03, 0, T); check(!m.paced && m.top <= 2.4, "variable refresh pace: frames 3% over the period (latency between its lowest and a period above) are not slowed");
+        vrun(&m, 12000, 1.5, 1.75, 1.01, 0, T); check(!m.paced && m.misses <= 121, "variable refresh pace: nor with a shortest latency of 1.75 periods (the misses are the frames' own)");
+        vrun(&m, 12000, 1.5, 1.4, 1.03, 24, T); check(m.top <= T + START_TOP && !m.s.pauses, "variable refresh pace: with repeats on top the latency stays under target + 1.9");
+        vrun(&m, 12000, 3.5, 0.7, 1, 24, T); double t2 = m.top; vrun(&m, 12000, 3.5, 0.7, 1, 24, 1.5); check(t2 <= T + 1 && m.top <= 2.5 && m.low > 1.4, "variable refresh pace: the target is the caller's (DM_PRESENT_VRR_PACE)");
+    }
     check(nvn_fstep_vrr_steps(1.3, 1.5, 3) == 1.4 && nvn_fstep_vrr_steps(0.4, 0, 3) == 0.4 && nvn_fstep_vrr_steps(0.1, 0.1, 3) == 0.25 && nvn_fstep_vrr_steps(30, 30, 3) == 3, "variable refresh: the step is the last frames' real time, held to its range");
     check(nvn_fstep_vrr_interval(1.2) == 1 && nvn_fstep_vrr_interval(0.6) == 1 && nvn_fstep_vrr_interval(1.6) == 2 && nvn_fstep_vrr_ratio(1.2) == 0.6f && nvn_fstep_vrr_ratio(2) == 1.0f, "variable refresh: the nearest whole interval, at least 1, and the ratio in 1/30 s ticks");
     {   // A frame step counted in ticks of 1/120 s (nvn_fstep.top, Breath of the Wild at 120 fps): frames that fit hold 120, late ones step to what they cost, and the step comes back

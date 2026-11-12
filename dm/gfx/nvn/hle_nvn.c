@@ -1845,6 +1845,7 @@ static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
 static _Atomic int g_vrr;   // variable refresh in force (vrr_tick)
 static _Atomic uint64_t g_vrr_period;   // its shortest frame, ns: 1 / the frame step's cap
+static _Atomic uint64_t g_vrr_pace_ns;   // the shortest time from one frame's start to the next while pictures wait for the screen (vrr_pace_tick; 0 or less than the period: the period)
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
@@ -1866,7 +1867,8 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
             // order and drops all but the newest two, and a dropped frame frees its slot, so Donkey Kong Bananza at the 30 fps cap ran 43-65 fps of game time and dropped about 110 of every 300 frames
         else if (atomic_load(&g_vrr)) {   // variable refresh: the display link is off, and each frame starts at least one frame of the cap after the last one's. The swapchain's slot times below pace two textures in turn, which let frames through at 7 and 14 ms by turns
             static uint64_t next; if (now_ns() < next) sleep_until_ns(next);
-            next = now_ns() + atomic_load(&g_vrr_period);
+            uint64_t per = atomic_load(&g_vrr_period), pace = atomic_load(&g_vrr_pace_ns);
+            next = now_ns() + (pace > per ? pace : per);
         }
         else if (mtl_link_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
         else if (wait) sleep_until_ns(at);
@@ -2240,6 +2242,39 @@ static void vrr_tick(int c) {
     if (vrr) { atomic_store(&g_vrr_period, (uint64_t)(1e9 / c)); mtl_link_mode_set(0); }
     atomic_store(&g_vrr, vrr);
 }
+// Variable refresh, once per present: the pace that keeps a drawable free (nvn_fstep_vrr_pace, nvn_fstep.h). At the cap the game and the screen run at the same rate, so each refresh the
+// system repeats left one more picture waiting until all three drawables were taken, and then every repeat stalled the game for a refresh (Breath of the Wild at 120 fps: 180 to 190
+// frames of 17 ms a minute while the system set the screen's brightness five times a second). The latency is the time from a present's call (call) to its picture on the screen, in periods
+// of the cap, of the newest present the system has reported; the frame just presented is expected that, less what the frames since started later than the cap's period.
+// DM_PRESENT_VRR_PACE: 0 = off (every frame starts a period after the last), another number = the latency drained to, in periods (default FSTEP_VRR_LAT)
+static void vrr_pace_tick(const win_t *o, uint64_t call, uint64_t f) {
+    static uint64_t calls[16], fed, was_period, pauses, sum_n; static nvn_vrr_pace s; static double target = -1, sum_ms, max_ms;
+    if (target < 0) {
+        const char *e = getenv("DM_PRESENT_VRR_PACE"); target = e ? atof(e) : FSTEP_VRR_LAT; if (target < 0) target = 0;
+        if (e) LOG("DM_PRESENT_VRR_PACE: %s", target > 0 ? "the latency drained to is set" : "off, every frame starts one period of the cap after the last");
+    }
+    uint64_t p = o->presents, period = atomic_load(&g_vrr_period);
+    calls[p % 16] = call;
+    if (!(target > 0) || !atomic_load(&g_vrr) || !period) { if (was_period) { memset(&s, 0, sizeof s); was_period = 0; atomic_store(&g_vrr_pace_ns, 0); } return; }
+    if (period != was_period) { memset(&s, 0, sizeof s); was_period = period; fed = p; sum_ms = max_ms = 0; sum_n = 0; }
+    uint64_t n = 0; double lat = 0, cur = 0;
+    for (uint64_t k = 1; k <= 12 && k < p && !n; k++) {
+        double at = mtl_presented_time(p - k), l = at > 0 ? (at * 1e9 - (double)calls[(p - k) % 16]) / (double)period : 0;
+        if (l > 0) { n = p - k; lat = l; }
+    }
+    if (n) cur = lat - ((double)(call - calls[n % 16]) / (double)period - (double)(p - n));
+    double scale = nvn_fstep_vrr_pace(&s, n > fed ? lat : 0, cur, target);
+    if (n > fed) fed = n;
+    atomic_store(&g_vrr_pace_ns, (uint64_t)((double)period * scale));
+    trow(f, "@vrr_lat", cur); trow(f, "@vrr_pace", scale);
+    if (s.pauses != pauses) { pauses = s.pauses; LOG("[nvn] variable refresh pace: paused for %u presents, %d drains in a row ended in a repeated refresh (latency %.1f ms)", s.off, FSTEP_VRR_BAD, cur * (double)period / 1e6); }
+    if (cur > 0) { double ms = cur * (double)period / 1e6; sum_ms += ms; sum_n++; if (ms > max_ms) max_ms = ms; }
+    if (p % 1800 == 0 && sum_n) {
+        LOG("[nvn] variable refresh pace up to present %llu: present to screen %.1f ms mean, %.1f max over the last 1800 (drained to %.1f); so far drains %llu, bad ones %llu, pauses %llu", (unsigned long long)p,
+            sum_ms / (double)sum_n, max_ms, target * (double)period / 1e6, (unsigned long long)s.drains, (unsigned long long)s.cut, (unsigned long long)s.pauses);
+        sum_ms = max_ms = 0; sum_n = 0;
+    }
+}
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
     uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
@@ -2519,6 +2554,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
       if (fin) nvn_queue_finish((queue_t *)q); }
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
+    vrr_pace_tick(o, t0, f);
     if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
         static unsigned isub = ~0u; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
         if (isub == ~0u) for (isub = 0; isub < NVN_NFUNC && strcmp(nvn_names[isub], "nvnQueueSubmitCommands"); isub++) {}
