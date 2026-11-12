@@ -2225,9 +2225,8 @@ extern int g_dm_present_link;
 static int fps_high(void);
 static void vrr_tick(int c) {
     static int env = -2, link_env = -1, link0 = -1;
-    static int fg = -1;   // frame generation shows its frames on the display link's ticks (nvn_mtl.m fg_on): no variable refresh with it
-    if (env == -2) { const char *e = getenv("DM_PRESENT_VRR"); env = e ? atoi(e) : -1; link_env = getenv("DM_PRESENT_LINK") != NULL; link0 = g_dm_present_link; e = getenv("DM_FRAMEGEN"); fg = e && atoi(e) > 0; }
-    int vrr = DM_GAME_VRR && dm_fps_state && c >= 60 && !link_env && !fg && env && (env == 1 || (front_fullscreen() && front_screen_variable_refresh()));
+    if (env == -2) { const char *e = getenv("DM_PRESENT_VRR"); env = e ? atoi(e) : -1; link_env = getenv("DM_PRESENT_LINK") != NULL; link0 = g_dm_present_link; }
+    int vrr = DM_GAME_VRR && dm_fps_state && c >= 60 && !link_env && env && (env == 1 || (front_fullscreen() && front_screen_variable_refresh()));
     static int was = -1;
     if (vrr != was) {
         LOG("[nvn] variable refresh %s", vrr ? "on: frames are shown when done, the game steps by their real time" : "off: frames follow the display link's ticks");
@@ -2391,12 +2390,6 @@ static void fstep_tick(const win_t *o, int c) {
     int kmin = fstep_hz() / c, kmax = ticks ? (!win || front_screen_max_fps() >= 120 ? FSTEP_TICKS_MAX : 2) : fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
          kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) * (ticks ? 2 : 1) : 0;   // the game's override is in vsyncs
-    // Frame generation (nvn_mtl.m mtl_fg_step_aside): with it on the hold stays at the cap's own. Its presents go through a ring of snapshots to a display link at twice the
-    // game's rate, and frames shown late there are first of all that path's: counted against the hold they took it 1 → 2 → 3 vsyncs, where the generated frames were still
-    // late and the hold never came back (Breath of the Wild at 5120x2880 on a Studio Display: 20 fps for the rest of the session, with the GPU half idle at its full clock
-    // and with Game Mode off). When half of the last 30 frames were late while frames are generated, the generation stops instead and the game's own frames are shown
-    static uint32_t fg_late; const int fg_rule = !ticks && mtl_fg_rule(), fgen = fg_rule && mtl_fg_generating(); uint64_t late0 = g_fs.late;
-    if (fg_rule && kmax > kmin) kmax = kmin;
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x300), 0, __ATOMIC_RELAXED);   // no fractional step unless variable refresh writes one below
     if (atomic_load(&g_vrr) && !fixed) {   // variable refresh: no hold to decide; the next frame steps by the time the last frames took (the game's own fixed step keeps its hold)
         static double before; double t = nvn_fstep_vrr_steps(shown, before, FSTEP_MAX * fstep_hz() / 60.0); before = shown > 0 ? shown : before;
@@ -2434,8 +2427,6 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.smax = dm_fps_step_max;   // the stub's largest step (Mario Kart World: 2): frames held longer than the game steps would play in slow motion
     g_fs.no_payback = fps_high();   // at 120 fps the game steps by its target, not by the step: a late frame is slow motion, so three raise the hold whatever the average (with a state page the game does take the step, in ticks: the rule its 120 fps was measured with stays)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, !ticks && (cslow || gslow));   // at 120 fps through a state page, no probes: a heavier scene's GPU time read as a slowed clock, and the hold flapped between 120 and 60
-    fg_late = fgen ? (fg_late << 1 | (g_fs.late != late0)) & 0x3fffffff : 0;   // the last 30 frames with frames generated: late or not
-    if (fgen && __builtin_popcount(fg_late) >= 15 && mtl_fg_step_aside(gpu * v / 1e6)) fg_late = 0;
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)(ticks ? nvn_fstep_interval(n) : n), __ATOMIC_RELAXED);
     if (ticks) { float r = nvn_fstep_ratio(n); uint32_t b; memcpy(&b, &r, sizeof b); __atomic_store_n((uint32_t *)(dm_fps_state + 0x300), b, __ATOMIC_RELAXED); tick_sum += (uint64_t)n; }
     atomic_store(&g_fs_k, g_fs.k);

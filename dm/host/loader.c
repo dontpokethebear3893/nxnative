@@ -318,10 +318,6 @@ static void install_fps_state(module_t *m) {
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
-    // Frame generation shows two frames for each one the game draws, so a 120 fps target would ask the screen for 240: the game draws 60 and 120 are shown
-    // (nvn_mtl.m fg_on). Set here, before anything reads the target (the frame step below, hle_fpslock.c, hle_nvn.c)
-    { const char *fg = getenv("DM_FRAMEGEN"), *e = getenv("DM_FPS_TARGET");
-      if (fg && atoi(fg) > 0 && (e ? atoi(e) : DM_GAME_FPS_TARGET) == 120) { setenv("DM_FPS_TARGET", "60", 1); LOG("frame generation (DM_FRAMEGEN): the 120 fps frame rate becomes 60 drawn by the game, shown as 120"); } }
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
