@@ -53,8 +53,8 @@ static void check(int which) {
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
-    setenv("DM_FPS_TARGET", which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
-    if (which == 20) test_fps_max = 60;
+    setenv("DM_FPS_TARGET", which >= 30 ? "90" : which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
+    if (which == 20 || which == 31) test_fps_max = 60;
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
@@ -112,7 +112,7 @@ static void check(int which) {
         *(int32_t *)(object + 0x64) = 1; *(uintptr_t *)(object + 0x20) = (uintptr_t)(object + 0x100);   // two levels from object + 0x100: level 1's count at +0x288
         sync = (int32_t *)(object + 0x100 + 0x100 + 0x88); *sync = which == 29 ? 0 : 2; sync[-0x40] = 3;   // and level 0's, which the host must not touch
         if (which != 28) { int32_t *t = (int32_t *)(base + 0x8d33de8); *t = which == 26 ? 60 : which == 29 ? 30 : -1; }
-    } else if (which == 17 || which == 18 || which == 19 || which == 20) {   // Fire Emblem Fortune's Weave: the target the rewriter found, 30 in gameplay (17) or 60 in a menu (18, at DM_FPS_TARGET=30)
+    } else if (which == 17 || which == 18 || which == 19 || which == 20 || which == 30 || which == 31) {   // Fire Emblem Fortune's Weave: the target the rewriter found, 30 in gameplay (17) or 60 in a menu (18, at DM_FPS_TARGET=30)
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
         *(uintptr_t *)(base + 0x21e60d8) = (uintptr_t)object;
@@ -127,7 +127,7 @@ static void check(int which) {
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
     assert(dm_fps_lock_engine() == engine);
-    if (which == 19) {   // 120: the target follows the hold, so the game's step stays what the screen shows; the game setting its own 30 again changes nothing
+    if (which == 19 || which == 30) {   // 120, and a 90 fps limit (30), which is the same mode with the cap the host's: the target follows the hold, so the game's step stays what the screen shows; the game setting its own 30 again changes nothing
         int32_t *t = (int32_t *)(object + 0x1dc);
         assert(*t == 120);
         test_high = 60; dm_fps_lock_tick(); assert(*t == 60);
@@ -135,7 +135,7 @@ static void check(int which) {
         *t = 30; dm_fps_lock_tick(); assert(*t == 120);
         munmap(base, len); return;
     }
-    if (which == 20) { assert(*(int32_t *)(object + 0x1dc) == 60); munmap(base, len); return; }   // a game not checked at 120 runs at 60
+    if (which == 20 || which == 31) { assert(*(int32_t *)(object + 0x1dc) == 60); munmap(base, len); return; }   // a game not checked at 120 runs at 60, at 120 and at 90 (31)
     if (which == 22) {   // 60: the fixed rate and the interval; the frame pace setting 30 again (a mode change) is raised again
         assert(*f == 60 && sync[0] == 1 && sync[1] == 1 && writes == 3);
         *f = 30; dm_fps_lock_tick(); assert(*f == 60 && writes == 4);
@@ -209,7 +209,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 32; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

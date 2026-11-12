@@ -320,8 +320,9 @@ static void install_fps_state(module_t *m) {
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
-    if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; using the game's own frame step", e); t = 0; }
+    if ((t == 90 || t == 120) && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=%d: this game's speed above 60 fps is not checked (profile fps_max); running at 60", t); t = 60; }
+    if (t != 0 && t != 30 && t != 60 && t != 90 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60, 90 or 120; using the game's own frame step", e); t = 0; }
+    if (t == 90) t = 120;   // the stubs take the same fractional step at both; 90 is a cap the host applies (hle_nvn.c high_cap_tick)
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // The game's heap, for builds whose stubs hand it to the game (the GAME_HEAP capability: Breath of the Wild's nninitStartup and nnMain read +0x310 / +0x318): the application
     // pool (hle_svc.c dm_app_pool, the player's DM_MEMORY_GB on the Mac) less 512 MB for the modules, in 2 MB steps, when the player raised the pool and that is more than the fixed 3.05 GB the
