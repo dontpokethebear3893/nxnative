@@ -6875,10 +6875,6 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
-// (magnification and minification linear, nearest or linear between levels, more than one LOD in range), which are the ones materials use. Comparison (shadow) and reduction samplers,
-// nearest ones and those held to one level (the bloom and blur chains) keep the game's level: there it would change what the shader is given, not how sharp a surface at a shallow angle is.
-// On a screen-aligned draw of a render target the footprint is square, so a raised level samples the same texels. Breath of the Wild asks for 1x on all but one sampler (2x); after Cemu's
-// graphic pack for it (overwriteAnisotropy on every texture but render targets, cube maps and shadows)
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];

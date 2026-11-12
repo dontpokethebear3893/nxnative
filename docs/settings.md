@@ -80,7 +80,7 @@ flowchart LR
 
 Shown for games whose profile names their shadow maps: Breath of the Wild. The game draws the sun's shadows into three 896x896 maps, whatever size the picture is, so at 4K and above shadow edges look blocky and crawl as the camera moves. **150%** and **200%** make those maps larger (1344 and 1792 on a side), which gives finer shadow edges. **100%**, the default, is the game's own size. The same idea as the Shadows option of Cemu's graphic packs for the Wii U version.
 
-- **Cost:** a little more GPU time for the shadow passes, and 12 MB of GPU memory at 200%.
+- **Cost:** a little more GPU time for the shadow passes, and about 14 MB more GPU memory at 200%.
 
 
 ### Game language
