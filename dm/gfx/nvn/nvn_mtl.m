@@ -16855,10 +16855,11 @@ static NSUInteger g_fg_key_w(void), g_fg_key_h(void);   // the interpolator's si
 // Frame generation steps aside when its frames do not come in time. The interpolation runs on the game's queue after each frame's work, so one that does not fit its tick
 // makes the presents late too, and late presents raised the frame step's hold (hle_nvn.c fstep_tick): Breath of the Wild at 5120x2880 on a 120 Hz screen went from 60 drawn
 // to 30 and then 20 as it entered the world and stayed there, the interpolation at 17-20 ms beside 16-18 ms of the game's own GPU time (the GPU's clock had followed the
-// lighter load down), every frame late at 20 fps and no trial back. So while frames are generated the hold does not rise (mtl_fg_keeps_hold), and when half of the last 30
+// lighter load down), every frame late at 20 fps and no trial back. So with frame generation on the hold stays at the cap's own (mtl_fg_rule), and when half of the last 30
 // frames were late the generation stops instead (mtl_fg_step_aside), for 2 s the first time and twice as long each time it has to stop again within 10 s of coming back, up
-// to 60 s; one that has run 30 s starts again from 2 s. Meanwhile no interpolation is encoded, the game's own frames are shown, and the hold follows the frames as it does
-// without frame generation. Three late frames in a row, the hold's own rule, stopped it four times in the first minute of a run that held 60 fps with it on throughout.
+// to 60 s; one that has run 30 s starts again from 2 s. Meanwhile no interpolation is encoded and the game's own frames are shown. The hold stays put then too: a first
+// version let it follow the frames while the generation was stopped, and on a Studio Display it rose 1 → 2 → 3 during a 4 s stop (the presents still go through the
+// snapshot ring to the 120 Hz link), the generation came back at 20 fps, a fifth of the frames stayed late there and the hold never fell again. Three late frames in a row, the hold's own rule, stopped it four times in the first minute of a run that held 60 fps with it on throughout.
 // DM_FRAMEGEN_ASIDE=0 is the behaviour before: the generation stays on whatever the frames do, and late frames raise the hold (to compare)
 #define FG_ASIDE_NS 2000000000ull
 #define FG_ASIDE_MAX_NS 60000000000ull
@@ -16875,8 +16876,8 @@ int mtl_fg_generating(void) {
     uint64_t z = 0; if (atomic_compare_exchange_strong(&g_fg_gen_since, &z, t) && g_fg_aside_n <= 30) MLOG("frame generation: on again after %.0f s", g_fg_aside_ns / 1e9);
     return 1;
 }
-// Whether the frame step keeps its hold where it is for now: frames are being generated, and late ones stop the generation instead (hle_nvn.c fstep_tick)
-int mtl_fg_keeps_hold(void) { return fg_aside_on() && mtl_fg_generating(); }
+// Whether the frame step keeps its hold at the cap's own: frame generation is on with its step-aside rule, so late frames stop the generation instead (hle_nvn.c fstep_tick)
+int mtl_fg_rule(void) { return fg_on() && fg_aside_on(); }
 // Half of the last 30 frames were late while frames were generated (hle_nvn.c fstep_tick). gpu_ms: the last frame's GPU time. Returns 0 when the generation stays on (DM_FRAMEGEN_ASIDE=0)
 int mtl_fg_step_aside(double gpu_ms) {
     if (!fg_on() || !fg_aside_on()) return 0;
