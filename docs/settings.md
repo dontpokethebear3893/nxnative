@@ -96,7 +96,8 @@ flowchart LR
 
 Shown for games whose profile names the draw that stretches the 3D scene to the output size: Breath of the Wild. It matters only when [Render scale](#render-scale) is below 100%: the game then draws its 3D scene smaller and stretches it to the output size before drawing the HUD on top. **MetalFX**, the default, has Apple's MetalFX spatial scaler do that step, so edges and foliage stay sharper than the game's own soft stretch; the HUD is drawn afterwards at full size either way. **Game's own** keeps the game's stretch. At 100% there is nothing to scale and the setting does nothing.
 
-- **Cost:** well under a millisecond of GPU time a frame on an M-series Mac at 4K to 5K.
+- **Cost:** about 0.7 ms of GPU time a frame on an M5 Max, scaling 3840x2160 to 5120x2880 (75% of 5K). At a 120 fps target that was 107–110 fps where the game's own stretch gave 114–118.
+- **With the Performance HUD on, expect a hitch every few minutes.** On screen at 120 fps with variable refresh, runs with MetalFX and the HUD both on had a GPU fault about once in four to five minutes: part of one frame is dropped and that frame takes about 100 ms, then the game goes on. With the HUD off, or with Game's own, there was none. Turn the Performance HUD off while this is set to MetalFX.
 
 ### Shadow resolution
 
