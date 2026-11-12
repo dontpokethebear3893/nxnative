@@ -2283,55 +2283,6 @@ static void vrr_pace_tick(const win_t *o, uint64_t call, uint64_t f) {
         sum_ms = max_ms = 0; sum_n = 0;
     }
 }
-// Variable refresh, once per present after the cap (c) is known: in fullscreen on a screen that has it, for a game whose profile says its stubs take a fractional step (vrr on, state +0x300),
-// frames go to the screen when they are done instead of on the display link's ticks, at most c a second, and the game steps by the time they really take (fstep_tick). Off during a
-// movie or a 30 fps cap (c below 60) and under the game's own fixed step (fstep_tick). DM_PRESENT_VRR: 0 never, 1 also in a window (for tests). The display link goes back to its mode when it ends
-extern int g_dm_present_link;
-static void vrr_tick(int c) {
-    static int link0 = -1; if (link0 < 0) link0 = g_dm_present_link;
-    int vrr = c >= 60 && vrr_can();
-    static int was = -1;
-    if (vrr != was) {
-        LOG("[nvn] variable refresh %s", vrr ? "on: frames are shown when done, the game steps by their real time" : "off: frames follow the display link's ticks");
-        if (!vrr && was == 1 && !fps_high()) mtl_link_mode_set(link0);   // at 120 fps high_cap_tick sets the link's mode every present
-        was = vrr;
-    }
-    if (vrr) { atomic_store(&g_vrr_period, (uint64_t)(1e9 / c)); mtl_link_mode_set(0); }
-    atomic_store(&g_vrr, vrr);
-}
-// Variable refresh, once per present: the pace that keeps a drawable free (nvn_fstep_vrr_pace, nvn_fstep.h). At the cap the game and the screen run at the same rate, so each refresh the
-// system repeats left one more picture waiting until all three drawables were taken, and then every repeat stalled the game for a refresh (Breath of the Wild at 120 fps: 180 to 190
-// frames of 17 ms a minute while the system set the screen's brightness five times a second). The latency is the time from a present's call (call) to its picture on the screen, in periods
-// of the cap, of the newest present the system has reported; the frame just presented is expected that, less what the frames since started later than the cap's period.
-// DM_PRESENT_VRR_PACE: 0 = off (every frame starts a period after the last), another number = the latency drained to, in periods (default FSTEP_VRR_LAT)
-static void vrr_pace_tick(const win_t *o, uint64_t call, uint64_t f) {
-    static uint64_t calls[16], fed, was_period, pauses, sum_n; static nvn_vrr_pace s; static double target = -1, sum_ms, max_ms;
-    if (target < 0) {
-        const char *e = getenv("DM_PRESENT_VRR_PACE"); target = e ? atof(e) : FSTEP_VRR_LAT; if (target < 0) target = 0;
-        if (e) LOG("DM_PRESENT_VRR_PACE: %s", target > 0 ? "the latency drained to is set" : "off, every frame starts one period of the cap after the last");
-    }
-    uint64_t p = o->presents, period = atomic_load(&g_vrr_period);
-    calls[p % 16] = call;
-    if (!(target > 0) || !atomic_load(&g_vrr) || !period) { if (was_period) { memset(&s, 0, sizeof s); was_period = 0; atomic_store(&g_vrr_pace_ns, 0); } return; }
-    if (period != was_period) { memset(&s, 0, sizeof s); was_period = period; fed = p; sum_ms = max_ms = 0; sum_n = 0; }
-    uint64_t n = 0; double lat = 0, cur = 0;
-    for (uint64_t k = 1; k <= 12 && k < p && !n; k++) {
-        double at = mtl_presented_time(p - k), l = at > 0 ? (at * 1e9 - (double)calls[(p - k) % 16]) / (double)period : 0;
-        if (l > 0) { n = p - k; lat = l; }
-    }
-    if (n) cur = lat - ((double)(call - calls[n % 16]) / (double)period - (double)(p - n));
-    double scale = nvn_fstep_vrr_pace(&s, n > fed ? lat : 0, cur, target);
-    if (n > fed) fed = n;
-    atomic_store(&g_vrr_pace_ns, (uint64_t)((double)period * scale));
-    trow(f, "@vrr_lat", cur); trow(f, "@vrr_pace", scale);
-    if (s.pauses != pauses) { pauses = s.pauses; LOG("[nvn] variable refresh pace: paused for %u presents, %d drains in a row ended in a repeated refresh (latency %.1f ms)", s.off, FSTEP_VRR_BAD, cur * (double)period / 1e6); }
-    if (cur > 0) { double ms = cur * (double)period / 1e6; sum_ms += ms; sum_n++; if (ms > max_ms) max_ms = ms; }
-    if (p % 1800 == 0 && sum_n) {
-        LOG("[nvn] variable refresh pace up to present %llu: present to screen %.1f ms mean, %.1f max over the last 1800 (drained to %.1f); so far drains %llu, bad ones %llu, pauses %llu", (unsigned long long)p,
-            sum_ms / (double)sum_n, max_ms, target * (double)period / 1e6, (unsigned long long)s.drains, (unsigned long long)s.cut, (unsigned long long)s.pauses);
-        sum_ms = max_ms = 0; sum_n = 0;
-    }
-}
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
     uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
