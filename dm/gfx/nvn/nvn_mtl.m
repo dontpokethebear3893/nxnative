@@ -16447,10 +16447,11 @@ static NSUInteger g_fg_key_w(void), g_fg_key_h(void);   // the interpolator's si
 // Frame generation steps aside when its frames do not come in time. The interpolation runs on the game's queue after each frame's work, so one that does not fit its tick
 // makes the presents late too, and late presents raised the frame step's hold (hle_nvn.c fstep_tick): Breath of the Wild at 5120x2880 on a 120 Hz screen went from 60 drawn
 // to 30 and then 20 as it entered the world and stayed there, the interpolation at 17-20 ms beside 16-18 ms of the game's own GPU time (the GPU's clock had followed the
-// lighter load down), every frame late at 20 fps and no trial back. So while frames are generated the hold does not rise: three late frames in a row stop the generation
-// instead (mtl_fg_step_aside), for 2 s the first time and twice as long each time it has to stop again within 10 s of coming back, up to 60 s; one that has run 30 s starts
-// again from 2 s. Meanwhile no interpolation is encoded, the game's own frames are shown, and the hold follows the frames as it does without frame generation.
-// DM_FRAMEGEN_ASIDE=0 leaves the generation on whatever the frames do (as before, to compare)
+// lighter load down), every frame late at 20 fps and no trial back. So while frames are generated the hold does not rise (mtl_fg_keeps_hold), and when half of the last 30
+// frames were late the generation stops instead (mtl_fg_step_aside), for 2 s the first time and twice as long each time it has to stop again within 10 s of coming back, up
+// to 60 s; one that has run 30 s starts again from 2 s. Meanwhile no interpolation is encoded, the game's own frames are shown, and the hold follows the frames as it does
+// without frame generation. Three late frames in a row, the hold's own rule, stopped it four times in the first minute of a run that held 60 fps with it on throughout.
+// DM_FRAMEGEN_ASIDE=0 is the behaviour before: the generation stays on whatever the frames do, and late frames raise the hold (to compare)
 #define FG_ASIDE_NS 2000000000ull
 #define FG_ASIDE_MAX_NS 60000000000ull
 static _Atomic uint64_t g_fg_aside_until;   // no interpolation before this time (now_ns)
@@ -16466,7 +16467,9 @@ int mtl_fg_generating(void) {
     uint64_t z = 0; if (atomic_compare_exchange_strong(&g_fg_gen_since, &z, t) && g_fg_aside_n <= 30) MLOG("frame generation: on again after %.0f s", g_fg_aside_ns / 1e9);
     return 1;
 }
-// Three late frames in a row while frames were generated (hle_nvn.c fstep_tick). gpu_ms: the last frame's GPU time. Returns 0 when the generation stays on (DM_FRAMEGEN_ASIDE=0)
+// Whether the frame step keeps its hold where it is for now: frames are being generated, and late ones stop the generation instead (hle_nvn.c fstep_tick)
+int mtl_fg_keeps_hold(void) { return fg_aside_on() && mtl_fg_generating(); }
+// Half of the last 30 frames were late while frames were generated (hle_nvn.c fstep_tick). gpu_ms: the last frame's GPU time. Returns 0 when the generation stays on (DM_FRAMEGEN_ASIDE=0)
 int mtl_fg_step_aside(double gpu_ms) {
     if (!fg_on() || !fg_aside_on()) return 0;
     uint64_t t = now_ns(), since = atomic_load(&g_fg_gen_since);
@@ -16474,7 +16477,7 @@ int mtl_fg_step_aside(double gpu_ms) {
     else if (since && t - since < 10000000000ull) g_fg_aside_ns = g_fg_aside_ns * 2 < FG_ASIDE_MAX_NS ? g_fg_aside_ns * 2 : FG_ASIDE_MAX_NS;
     atomic_store(&g_fg_gen_since, 0); atomic_store(&g_fg_aside_until, t + g_fg_aside_ns);
     if (++g_fg_aside_n <= 30 || !(g_fg_aside_n % 20))
-        MLOG("frame generation: stepped aside for %.0f s: three late frames in a row with it on (the frame's GPU time %.1f ms, the last interpolation's %.1f ms at %lux%lu); the game's own frames are shown meanwhile (#%llu)",
+        MLOG("frame generation: stepped aside for %.0f s: half of the last 30 frames were late with it on (the frame's GPU time %.1f ms, the last interpolation's %.1f ms at %lux%lu); the game's own frames are shown meanwhile (#%llu)",
              g_fg_aside_ns / 1e9, gpu_ms, g_fg_gpu_last * 1e3, (unsigned long)g_fg_key_w(), (unsigned long)g_fg_key_h(), (unsigned long long)g_fg_aside_n);
     return 1;
 }
@@ -16640,6 +16643,10 @@ static void fg_encode(id<MTL4CommandBuffer> cb, int k, int pk, double period) {
     fi.jitterOffsetX = 0; fi.jitterOffsetY = 0; fi.depthReversed = YES;
     fi.shouldResetHistory = g_fg_warm == 0;
     [fi encodeToCommandBuffer:cb];
+    // DM_FRAMEGEN_TEST_REPEAT=<n> (diagnostic, 2 to 8): the interpolation is encoded n times, so it costs n times as much: a generation that does not fit its tick, to see
+    // what the frame step and mtl_fg_step_aside do then
+    { static int rpt = -1; if (rpt < 0) { const char *e = getenv("DM_FRAMEGEN_TEST_REPEAT"); int n = e ? atoi(e) : 1; rpt = n < 1 ? 1 : n > 8 ? 8 : n; if (rpt > 1) MLOG("frame generation: each interpolation is encoded %d times (DM_FRAMEGEN_TEST_REPEAT)", rpt); }
+      for (int i = 1; i < rpt; i++) [fi encodeToCommandBuffer:cb]; }
     if (g_fg_heap) {   // after everything the interpolation ran
         id<MTL4ComputeCommandEncoder> te = [cb computeCommandEncoder];
         [te barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionNone];   // the copy below is a blit

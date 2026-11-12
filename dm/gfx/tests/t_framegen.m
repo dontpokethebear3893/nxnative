@@ -208,10 +208,10 @@ int main(void) { @autoreleasepool {
       }
       CHECK("60 fps on 120 Hz ticks: its own pictures, each held two ticks, until three came in time", paused120);
       CHECK("60 fps on 120 Hz ticks: each present's generated frame, then its own picture", order120); }
-    // Stepping aside (mtl_fg_step_aside: three late frames in a row with it on): no interpolation is encoded until the pause is over, the history then starts again, and a
+    // Stepping aside (mtl_fg_step_aside: too many late frames with it on): no interpolation is encoded until the pause is over, the history then starts again, and a
     // pause that follows within 10 s of the last one's end is twice as long; after 30 s of generated frames it is 2 s again
-    { CHECK("frames are generated until it steps aside", mtl_fg_generating());
-      CHECK("it steps aside for 2 s", mtl_fg_step_aside(5.0) && !mtl_fg_generating() && g_fg_aside_ns == FG_ASIDE_NS);
+    { CHECK("frames are generated until it steps aside, and the hold is kept meanwhile", mtl_fg_generating() && mtl_fg_keeps_hold());
+      CHECK("it steps aside for 2 s, and the hold is the frame step's again", mtl_fg_step_aside(5.0) && !mtl_fg_generating() && !mtl_fg_keeps_hold() && g_fg_aside_ns == FG_ASIDE_NS);
       atomic_store(&g_fg_aside_until, now_ns() + 3600000000000ull);   // (the ticks below can wait a second each for a drawable: the pause must not run out under them)
       int none = 1;
       for (int i = 50; i < 54; i++) @autoreleasepool { tex_t t = frame(i); present_enqueue(&t, 1 / 60.0, NULL, 0); copied(); none &= !g_snap[last_slot()].gen_ok && !g_pq[(g_pq_in - 1) % PQ].gen; tick(); tick(); }
