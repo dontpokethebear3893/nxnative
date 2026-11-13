@@ -109,6 +109,14 @@ For games drawn with NVN. Ground, walls and water seen at a slant blur into the 
 
 - **Cost:** a little more GPU time; on an M-series Mac 16x is rarely measurable.
 
+### Scene upscaling
+
+Shown for games whose profile names the draw that stretches the 3D scene to the output size: Breath of the Wild. It matters only when [Render scale](#render-scale) is below 100%: the game then draws its 3D scene smaller and stretches it to the output size before drawing the HUD on top. **MetalFX**, the default, has Apple's MetalFX spatial scaler do that step, so edges and foliage stay sharper than the game's own soft stretch; the HUD is drawn afterwards at full size either way. **Game's own** keeps the game's stretch. At 100% there is nothing to scale and the setting does nothing.
+
+- **Cost:** about 0.7 ms of GPU time a frame on an M5 Max, scaling 3840x2160 to 5120x2880 (75% of 5K). At a 120 fps target that was 107–110 fps where the game's own stretch gave 114–118.
+- **MetalFX turns the Performance HUD off.** With both on, the game had a GPU fault about once in four to five minutes (on screen at 120 fps with variable refresh): part of one frame is dropped and that frame takes about 100 ms. With either one off there was none. So while this is set to MetalFX the game starts without the [Performance HUD](#performance-hud), whatever that setting says, and the settings screen does not offer it; with Game's own it is offered again.
+
+
 ### Game language
 
 The game's own languages. The app was packed with one of them; pick another here without repacking. A game packed from a dump or a NUP may come without its list: every language is offered then, with a note, and a game that lacks the one you pick may show another.
